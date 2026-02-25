@@ -1,6 +1,8 @@
 # encoding:utf-8
 
+import base64
 import json
+import os
 import time
 
 import requests
@@ -34,6 +36,8 @@ class DoubaoBot(Bot):
 
     def reply(self, query, context=None):
         # acquire reply content
+        if context.type == ContextType.IMAGE:
+            return self.reply_image(context)
         if context.type == ContextType.TEXT:
             logger.info("[DOUBAO] query={}".format(query))
 
@@ -80,6 +84,78 @@ class DoubaoBot(Bot):
         else:
             reply = Reply(ReplyType.ERROR, "Bot不支持处理{}类型的消息".format(context.type))
             return reply
+
+    def reply_image(self, context):
+        """
+        Process image message using Ark OpenAI-compatible multimodal API.
+        """
+        image_path = context.content
+        if not image_path or not os.path.exists(image_path):
+            return Reply(ReplyType.ERROR, "图片文件不存在，无法识别。")
+
+        try:
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            image_base64 = base64.b64encode(image_data).decode("utf-8")
+
+            ext = os.path.splitext(image_path)[1].lower()
+            mime_type_map = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }
+            mime_type = mime_type_map.get(ext, "image/jpeg")
+            vision_prompt = conf().get("image_recognition_prompt", "请描述这张图片的主要内容。")
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + self.api_key
+            }
+            body = {
+                "model": self.args.get("model"),
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": vision_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_base64}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "thinking": {"type": "disabled"}
+            }
+
+            res = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=body
+            )
+            if res.status_code == 200:
+                data = res.json()
+                content = data["choices"][0]["message"]["content"]
+                if isinstance(content, list):
+                    content = "".join(
+                        item.get("text", "") for item in content if isinstance(item, dict)
+                    )
+                return Reply(ReplyType.TEXT, content)
+
+            err_msg = ""
+            try:
+                err_msg = res.json().get("error", {}).get("message", "")
+            except Exception:
+                err_msg = res.text[:200]
+            logger.error(f"[DOUBAO] image recognition failed, status={res.status_code}, msg={err_msg}")
+            return Reply(ReplyType.ERROR, "识图失败，请确认当前模型支持视觉输入。")
+        except Exception as e:
+            logger.exception(e)
+            return Reply(ReplyType.ERROR, f"识图失败: {e}")
 
     def reply_text(self, session: DoubaoSession, args=None, retry_count: int = 0) -> dict:
         """
