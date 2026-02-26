@@ -322,9 +322,10 @@ class AgentBridge:
                 logger.info(f"[AgentBridge] Scheduled task execution: excluded scheduler tool ({len(filtered_tools)}/{len(original_tools)} tools)")
             elif is_image_feedback:
                 # In image feedback flow, disable `send` to avoid "帮你发送图片" mis-trigger.
-                filtered_tools = [tool for tool in agent.tools if tool.name != "send"]
+                disabled_tools = {"send", "bash", "read"}
+                filtered_tools = [tool for tool in agent.tools if tool.name not in disabled_tools]
                 agent.tools = filtered_tools
-                logger.info(f"[AgentBridge] Image feedback mode: excluded send tool ({len(filtered_tools)}/{len(original_tools)} tools)")
+                logger.info(f"[AgentBridge] Image feedback mode: excluded tools {sorted(disabled_tools)} ({len(filtered_tools)}/{len(original_tools)} tools)")
             else:
                 # Attach context to scheduler tool if present
                 if context and agent.tools:

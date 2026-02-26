@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import pickle
+import sys
 
 from common.log import logger
 
@@ -291,10 +292,24 @@ def load_config():
     logger.info(" \\____\\___/ \\_/\\_//_/   \\_\\__, |\\___|_| |_|\\__|")
     logger.info("                          |___/                 ")
     logger.info("")
-    config_path = "./config.json"
-    if not os.path.exists(config_path):
-        logger.info("閰嶇疆鏂囦欢涓嶅瓨鍦紝灏嗕娇鐢╟onfig-template.json妯℃澘")
-        config_path = "./config-template.json"
+    config_path = os.environ.get("CONFIG_PATH", "").strip()
+    if not config_path:
+        for idx, arg in enumerate(sys.argv):
+            if arg == "--config" and idx + 1 < len(sys.argv):
+                config_path = sys.argv[idx + 1].strip()
+                break
+            if arg.startswith("--config="):
+                config_path = arg.split("=", 1)[1].strip()
+                break
+
+    if config_path:
+        config_path = os.path.abspath(os.path.expanduser(config_path))
+        logger.info(f"[INIT] use config from CONFIG_PATH/--config: {config_path}")
+    else:
+        config_path = "./config.json"
+        if not os.path.exists(config_path):
+            logger.info("閰嶇疆鏂囦欢涓嶅瓨鍦紝灏嗕娇鐢╟onfig-template.json妯℃澘")
+            config_path = "./config-template.json"
 
     config_str = read_file(config_path)
     logger.debug("[INIT] config str: {}".format(drag_sensitive(config_str)))

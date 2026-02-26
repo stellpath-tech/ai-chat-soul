@@ -247,13 +247,24 @@ class ChatChannel(Channel):
                 if conf().get("image_recognition", True):
                     use_agent_for_image = conf().get("image_use_agent", True) and conf().get("agent", False)
                     if use_agent_for_image:
-                        prompt = conf().get(
-                            "image_agent_prompt",
-                            "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。"
-                        )
-                        agent_context = Context(ContextType.TEXT, f"{prompt}\n[图片: {image_path}]", dict(context.kwargs))
-                        agent_context["origin_ctype"] = ContextType.IMAGE
-                        vision_reply = super().build_reply_content(agent_context.content, agent_context)
+                        # Stage 1: use vision-capable model adapter to parse image content.
+                        base_vision_reply = Bridge().fetch_reply_content(image_path, context)
+                        if base_vision_reply and base_vision_reply.type != ReplyType.ERROR:
+                            # Stage 2: let agent rephrase with persona + conversation context.
+                            prompt = conf().get(
+                                "image_agent_prompt",
+                                "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。"
+                            )
+                            agent_context = Context(
+                                ContextType.TEXT,
+                                f"{prompt}\n\n图片识别结果：\n{base_vision_reply.content}",
+                                dict(context.kwargs)
+                            )
+                            agent_context["origin_ctype"] = ContextType.IMAGE
+                            agent_context["image_feedback_mode"] = True
+                            vision_reply = super().build_reply_content(agent_context.content, agent_context)
+                        else:
+                            vision_reply = base_vision_reply
                     else:
                         vision_reply = Bridge().fetch_reply_content(image_path, context)
                     if vision_reply and vision_reply.type != ReplyType.ERROR:
