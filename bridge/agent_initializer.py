@@ -49,41 +49,52 @@ class AgentInitializer:
         # Get workspace from config
         workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
         
+        # For device sessions, give each device its own isolated working directory.
+        # Tools (edit/read/write) will use this as cwd, so MEMORY.md and daily notes
+        # are written under the device's workspace rather than the global one.
+        if session_id:
+            agent_workspace = os.path.join(workspace_root, "devices", session_id)
+            os.makedirs(agent_workspace, exist_ok=True)
+        else:
+            agent_workspace = workspace_root
+        
         # Migrate API keys
         self._migrate_config_to_env(workspace_root)
         
         # Load environment variables
         self._load_env_file()
         
-        # Initialize workspace
+        # Initialize workspace templates inside the agent's working directory
         from agent.prompt import ensure_workspace, load_context_files, PromptBuilder
-        workspace_files = ensure_workspace(workspace_root, create_templates=True)
+        workspace_files = ensure_workspace(agent_workspace, create_templates=True)
         
         if session_id is None:
-            logger.info(f"[AgentInitializer] Workspace initialized at: {workspace_root}")
+            logger.info(f"[AgentInitializer] Workspace initialized at: {agent_workspace}")
+        else:
+            logger.info(f"[AgentInitializer] Device workspace: {agent_workspace}")
         
-        # Setup memory system
-        memory_manager, memory_tools = self._setup_memory_system(workspace_root, session_id)
+        # Setup memory system (uses agent_workspace for per-device isolation)
+        memory_manager, memory_tools = self._setup_memory_system(agent_workspace, session_id)
         
-        # Load tools
-        tools = self._load_tools(workspace_root, memory_manager, memory_tools, session_id)
+        # Load tools (cwd = agent_workspace so file edits go to the right place)
+        tools = self._load_tools(agent_workspace, memory_manager, memory_tools, session_id)
         
         # Initialize scheduler if needed
         self._initialize_scheduler(tools, session_id)
         
-        # Load context files
-        context_files = load_context_files(workspace_root)
+        # Load context files from agent workspace
+        context_files = load_context_files(agent_workspace)
         
-        # Initialize skill manager
+        # Skills are shared from global workspace_root
         skill_manager = self._initialize_skill_manager(workspace_root, session_id)
         
         # Check if first conversation
         from agent.prompt.workspace import is_first_conversation, mark_conversation_started
-        is_first = is_first_conversation(workspace_root)
+        is_first = is_first_conversation(agent_workspace)
         
         # Build system prompt
-        prompt_builder = PromptBuilder(workspace_dir=workspace_root, language="zh")
-        runtime_info = self._get_runtime_info(workspace_root)
+        prompt_builder = PromptBuilder(workspace_dir=agent_workspace, language="zh")
+        runtime_info = self._get_runtime_info(agent_workspace)
         
         system_prompt = prompt_builder.build(
             tools=tools,
@@ -95,7 +106,7 @@ class AgentInitializer:
         )
         
         if is_first:
-            mark_conversation_started(workspace_root)
+            mark_conversation_started(agent_workspace)
         
         # Get cost control parameters
         from config import conf
@@ -108,7 +119,7 @@ class AgentInitializer:
             tools=tools,
             max_steps=max_steps,
             output_mode="logger",
-            workspace_dir=workspace_root,
+            workspace_dir=agent_workspace,
             skill_manager=skill_manager,
             enable_skills=True,
             max_context_tokens=max_context_tokens,
@@ -135,8 +146,12 @@ class AgentInitializer:
     
     def _setup_memory_system(self, workspace_root: str, session_id: Optional[str] = None):
         """
-        Setup memory system
-        
+        Setup memory system.
+
+        When session_id is provided (i.e. a device_id is present), the memory
+        workspace is isolated under ``{workspace_root}/devices/{session_id}`` so
+        that each device maintains its own long-term memory store.
+
         Returns:
             (memory_manager, memory_tools) tuple
         """
@@ -148,6 +163,9 @@ class AgentInitializer:
             from agent.tools import MemorySearchTool, MemoryGetTool
             from config import conf
             
+            # workspace_root is already device-specific when session_id is set
+            # (resolved in initialize_agent before this method is called)
+
             # Get OpenAI config
             openai_api_key = conf().get("open_ai_api_key", "")
             openai_api_base = conf().get("open_ai_api_base", "")
@@ -167,7 +185,7 @@ class AgentInitializer:
                 except Exception as e:
                     logger.warning(f"[AgentInitializer] OpenAI embedding failed: {e}")
             
-            # Create memory manager
+            # Create memory manager using the workspace passed in
             memory_config = MemoryConfig(workspace_root=workspace_root)
             memory_manager = MemoryManager(memory_config, embedding_provider=embedding_provider)
             
