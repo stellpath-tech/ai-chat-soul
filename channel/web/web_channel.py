@@ -3,6 +3,9 @@ import time
 import web
 import json
 import uuid
+import base64
+import tempfile
+from collections import deque
 from queue import Queue, Empty
 from bridge.context import *
 from bridge.reply import Reply, ReplyType
@@ -51,6 +54,13 @@ class WebChannel(ChatChannel):
         self.request_to_session = {}   # request_id -> session_id
         self.sse_queues = {}           # request_id -> Queue (SSE streaming)
         self._http_server = None
+        # 设备注册中心：device_id -> {lastSeen: float}
+        self.device_registry = {}
+        self._device_registry_lock = threading.Lock()
+        self._registry_file = None   # 启动后由 startup() 确定持久化路径
+        # 聊天记录队列：device_id -> deque of Message dicts（DEVICE 来源的消息，最多 100 条）
+        self.chatlog_queues = {}       # device_id -> deque(maxlen=100)
+        self._chatlog_lock = threading.Lock()
 
 
     def _generate_msg_id(self):
@@ -80,6 +90,12 @@ class WebChannel(ChatChannel):
             if not session_id:
                 logger.error(f"No session_id found for request {request_id}")
                 return
+
+            # 如果是 DEVICE 来源的请求，将 AI 回复写入聊天记录队列
+            source = context.get("source", "APP")
+            device_id = context.get("device_id", "")
+            if source == "DEVICE" and device_id and reply.content:
+                self._push_chatlog(device_id, "assistant", reply.content)
 
             # SSE mode: push done event to SSE queue
             if request_id in self.sse_queues:
@@ -147,16 +163,142 @@ class WebChannel(ChatChannel):
 
         return on_event
 
+    def _save_image_from_b64(self, b64_data: str, image_type: str = "jpeg") -> str:
+        """将 base64 图片解码并保存为临时文件，返回文件路径；失败返回空字符串"""
+        try:
+            # 兼容 data:image/jpeg;base64,<data> 格式
+            if ',' in b64_data:
+                b64_data = b64_data.split(',', 1)[1]
+            image_bytes = base64.b64decode(b64_data)
+            suffix = f".{image_type.lstrip('.')}"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="webchan_img_") as f:
+                f.write(image_bytes)
+                return f.name
+        except Exception as e:
+            logger.error(f"[WebChannel] Failed to decode image: {e}")
+            return ""
+
+    def _push_chatlog(self, device_id: str, role: str, content: str):
+        """将一条消息写入指定设备的聊天记录队列（环形缓冲，最多保留 100 条）"""
+        with self._chatlog_lock:
+            if device_id not in self.chatlog_queues:
+                self.chatlog_queues[device_id] = deque(maxlen=100)
+            self.chatlog_queues[device_id].append({
+                "role": role,
+                "content": content,
+                "timestamp": int(time.time() * 1000)
+            })
+
+    def _get_registry_file(self) -> str:
+        """返回设备注册表的持久化文件路径（~/cow/devices/registry.json）"""
+        if self._registry_file:
+            return self._registry_file
+        from common.utils import expand_path
+        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        devices_dir = os.path.join(workspace_root, "devices")
+        os.makedirs(devices_dir, exist_ok=True)
+        self._registry_file = os.path.join(devices_dir, "registry.json")
+        return self._registry_file
+
+    def _load_device_registry(self):
+        """从磁盘加载设备注册表（服务启动时调用）"""
+        try:
+            path = self._get_registry_file()
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                with self._device_registry_lock:
+                    self.device_registry = data
+                logger.info(f"[WebChannel] Loaded {len(data)} device(s) from registry")
+        except Exception as e:
+            logger.warning(f"[WebChannel] Failed to load device registry: {e}")
+
+    def _save_device_registry(self):
+        """将设备注册表持久化到磁盘（注册/更新时调用）"""
+        try:
+            path = self._get_registry_file()
+            with self._device_registry_lock:
+                snapshot = dict(self.device_registry)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[WebChannel] Failed to save device registry: {e}")
+
+    def register_device(self):
+        """POST /api/device/register — 设备上线注册"""
+        try:
+            data = web.data()
+            json_data = json.loads(data)
+            device_id = json_data.get("deviceId", "").strip()
+            if not device_id:
+                return json.dumps({"success": False, "message": "deviceId is required", "data": None})
+            with self._device_registry_lock:
+                self.device_registry[device_id] = {"lastSeen": time.time()}
+            # 持久化到磁盘（异步，避免阻塞响应）
+            threading.Thread(target=self._save_device_registry, daemon=True).start()
+            logger.info(f"[WebChannel] Device registered: {device_id}")
+            return json.dumps({"success": True, "message": "ok", "data": None})
+        except Exception as e:
+            logger.error(f"[WebChannel] register_device error: {e}")
+            return json.dumps({"success": False, "message": str(e), "data": None})
+
+    def list_devices(self):
+        """GET /api/device — 拉取已注册设备列表"""
+        try:
+            with self._device_registry_lock:
+                devices = [
+                    {"deviceId": did, "lastSeen": int(info["lastSeen"] * 1000)}
+                    for did, info in self.device_registry.items()
+                ]
+            return json.dumps({"success": True, "message": "ok", "data": devices})
+        except Exception as e:
+            logger.error(f"[WebChannel] list_devices error: {e}")
+            return json.dumps({"success": False, "message": str(e), "data": []})
+
+    def pull_chatlog(self):
+        """GET /api/chatlog/pull — APP 消费来自设备的聊天记录（每次最多 10 条）"""
+        try:
+            device_id = web.ctx.env.get("HTTP_X_DEVICE_ID", "").strip()
+            if not device_id:
+                return json.dumps({"success": False, "message": "x-device-id header is required", "data": {"messages": []}})
+            messages = []
+            with self._chatlog_lock:
+                q = self.chatlog_queues.get(device_id)
+                if q:
+                    for _ in range(10):
+                        if not q:
+                            break
+                        messages.append(q.popleft())
+            return json.dumps({"success": True, "message": "ok", "data": {"messages": messages}}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] pull_chatlog error: {e}")
+            return json.dumps({"success": False, "message": str(e), "data": {"messages": []}})
+
     def post_message(self):
         """
         Handle incoming messages from users via POST request.
         Returns a request_id for tracking this specific request.
+        Supports headers:
+          x-device-id : device identifier (used as session_id for memory isolation)
+          source      : 'DEVICE' | 'APP'  (default: 'APP')
         """
         try:
+            # 读取请求来源相关 headers
+            device_id = web.ctx.env.get("HTTP_X_DEVICE_ID", "").strip()
+            source = web.ctx.env.get("HTTP_SOURCE", "APP").strip().upper()
+            if source not in ("DEVICE", "APP"):
+                source = "APP"
+
             data = web.data()
             json_data = json.loads(data)
-            session_id = json_data.get('session_id', f'session_{int(time.time())}')
+            # 如果携带了 x-device-id，则以 device_id 作为 session，实现记忆隔离
+            if device_id:
+                session_id = device_id
+            else:
+                session_id = json_data.get('session_id', f'session_{int(time.time())}')
             prompt = json_data.get('message', '')
+            image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
+            image_type = json_data.get('image_type', 'jpeg')  # 图片格式，默认 jpeg
             use_sse = json_data.get('stream', True)
 
             request_id = self._generate_request_id()
@@ -168,15 +310,52 @@ class WebChannel(ChatChannel):
             if use_sse:
                 self.sse_queues[request_id] = Queue()
 
+            msg = WebMessage(self._generate_msg_id(), prompt or image_b64)
+            msg.from_user_id = session_id
+
+            # ---------- 图片消息 ----------
+            if image_b64:
+                image_path = self._save_image_from_b64(image_b64, image_type)
+                if not image_path:
+                    if request_id in self.sse_queues:
+                        del self.sse_queues[request_id]
+                    return json.dumps({"status": "error", "message": "Invalid image data"})
+
+                msg.content = image_path
+                context = self._compose_context(ContextType.IMAGE, image_path, msg=msg, isgroup=False)
+                if context is None:
+                    if request_id in self.sse_queues:
+                        del self.sse_queues[request_id]
+                    return json.dumps({"status": "error", "message": "Message was filtered"})
+
+                # 如果同时附带了文字，覆盖识图 prompt
+                if prompt:
+                    context.content = image_path
+                    context["image_caption"] = prompt
+
+                context["session_id"] = session_id
+                context["receiver"] = session_id
+                context["request_id"] = request_id
+                context["device_id"] = device_id
+                context["source"] = source
+
+                if use_sse:
+                    context["on_event"] = self._make_sse_callback(request_id)
+
+                if source == "DEVICE" and device_id:
+                    self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
+
+                threading.Thread(target=self.produce, args=(context,)).start()
+                return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
+
+            # ---------- 文本消息 ----------
             trigger_prefixs = conf().get("single_chat_prefix", [""])
             if check_prefix(prompt, trigger_prefixs) is None:
                 if trigger_prefixs:
                     prompt = trigger_prefixs[0] + prompt
                     logger.debug(f"[WebChannel] Added prefix to message: {prompt}")
 
-            msg = WebMessage(self._generate_msg_id(), prompt)
-            msg.from_user_id = session_id
-
+            msg.content = prompt
             context = self._compose_context(ContextType.TEXT, prompt, msg=msg, isgroup=False)
 
             if context is None:
@@ -188,9 +367,16 @@ class WebChannel(ChatChannel):
             context["session_id"] = session_id
             context["receiver"] = session_id
             context["request_id"] = request_id
+            context["device_id"] = device_id
+            context["source"] = source
+            context["user_message"] = prompt
 
             if use_sse:
                 context["on_event"] = self._make_sse_callback(request_id)
+
+            # DEVICE 来源：将用户消息写入聊天记录队列
+            if source == "DEVICE" and device_id:
+                self._push_chatlog(device_id, "user", prompt)
 
             threading.Thread(target=self.produce, args=(context,)).start()
 
@@ -271,6 +457,9 @@ class WebChannel(ChatChannel):
 
     def startup(self):
         port = conf().get("web_port", 9899)
+
+        # 从磁盘恢复设备注册表
+        self._load_device_registry()
         
         # 打印可用渠道类型提示
         logger.info("[WebChannel] 当前channel为web，可修改 config.json 配置文件中的 channel_type 字段进行切换。全部可用类型为：")
@@ -303,6 +492,9 @@ class WebChannel(ChatChannel):
             '/api/memory/content', 'MemoryContentHandler',
             '/api/scheduler', 'SchedulerHandler',
             '/api/logs', 'LogsHandler',
+            '/api/device/register', 'DeviceRegisterHandler',
+            '/api/device', 'DeviceListHandler',
+            '/api/chatlog/pull', 'ChatlogPullHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -517,6 +709,24 @@ class LogsHandler:
                 return
 
         return generate()
+
+
+class DeviceRegisterHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        return WebChannel().register_device()
+
+
+class DeviceListHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        return WebChannel().list_devices()
+
+
+class ChatlogPullHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        return WebChannel().pull_chatlog()
 
 
 class AssetsHandler:
