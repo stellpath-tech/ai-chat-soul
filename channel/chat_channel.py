@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import shutil
 import threading
@@ -251,7 +251,9 @@ class ChatChannel(Channel):
                         base_vision_reply = Bridge().fetch_reply_content(image_path, context)
                         if base_vision_reply and base_vision_reply.type != ReplyType.ERROR:
                             # Stage 2: let agent rephrase with persona + conversation context.
-                            prompt = conf().get(
+                            # Prefer user-supplied caption; fall back to config default.
+                            image_caption = context.get("image_caption", "")
+                            prompt = image_caption or conf().get(
                                 "image_agent_prompt",
                                 "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。"
                             )
