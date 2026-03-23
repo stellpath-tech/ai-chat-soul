@@ -61,6 +61,10 @@ class WebChannel(ChatChannel):
         # 聊天记录队列：device_id -> deque of Message dicts（DEVICE 来源的消息，最多 100 条）
         self.chatlog_queues = {}       # device_id -> deque(maxlen=100)
         self._chatlog_lock = threading.Lock()
+        # 宠物设备事件队列：device_id -> deque，每条独立，最多 50 条，超出时丢弃最旧
+        self.pet_event_queues = {}     # device_id -> deque of event dict
+        self._pet_event_lock = threading.Lock()
+        self._pet_event_max = 50
 
 
     def _generate_msg_id(self):
@@ -253,6 +257,124 @@ class WebChannel(ChatChannel):
             return json.dumps({"success": True, "message": "ok", "data": devices})
         except Exception as e:
             logger.error(f"[WebChannel] list_devices error: {e}")
+            return json.dumps({"success": False, "message": str(e), "data": []})
+
+    def _validate_pet_event(self, raw) -> tuple:
+        """
+        校验单条宠物事件。成功返回 (True, normalized_dict)，失败返回 (False, error_message)。
+        """
+        if not isinstance(raw, dict):
+            return False, "each event must be an object"
+        et = raw.get("type")
+        if et not in ("SHAKE", "TEMPERATURE_UPDATE", "HUMIDITY_UPDATE"):
+            return False, "invalid event type"
+        try:
+            ts = raw["ts"]
+            if not isinstance(ts, (int, float)):
+                return False, "ts must be a number"
+        except KeyError:
+            return False, "ts is required"
+        payload = raw.get("payload", None)
+        if et == "SHAKE":
+            if payload is not None and payload != {}:
+                return False, "SHAKE payload must be null"
+            norm = {"type": et, "ts": ts, "payload": None}
+        elif et in ("TEMPERATURE_UPDATE", "HUMIDITY_UPDATE"):
+            if not isinstance(payload, dict) or "value" not in payload:
+                return False, f"{et} requires payload.value"
+            v = payload["value"]
+            if not isinstance(v, (int, float)):
+                return False, "payload.value must be a number"
+            norm = {"type": et, "ts": ts, "payload": {"value": v}}
+        else:
+            return False, "invalid event type"
+        return True, norm
+
+    def _enqueue_pet_events(self, device_id: str, events: list):
+        with self._pet_event_lock:
+            if device_id not in self.pet_event_queues:
+                self.pet_event_queues[device_id] = deque()
+            q = self.pet_event_queues[device_id]
+            for ev in events:
+                while len(q) >= self._pet_event_max:
+                    q.popleft()
+                q.append(ev)
+
+    def send_pet_events(self):
+        """POST /api/pet/event/send — 设备上报事件"""
+        try:
+            device_id = web.ctx.env.get("HTTP_X_DEVICE_ID", "").strip()
+            if not device_id:
+                logger.warning("[WebChannel] pet/event/send rejected: missing x-device-id")
+                return json.dumps({"success": False, "message": "x-device-id header is required", "data": None})
+            body = json.loads(web.data())
+            events_in = body.get("events")
+            if not isinstance(events_in, list):
+                logger.warning(f"[WebChannel] pet/event/send rejected device={device_id!r}: events is not an array")
+                return json.dumps({"success": False, "message": "events must be an array", "data": None})
+            normalized = []
+            for i, raw in enumerate(events_in):
+                ok, msg_or_ev = self._validate_pet_event(raw)
+                if not ok:
+                    logger.warning(
+                        f"[WebChannel] pet/event/send rejected device={device_id!r} events[{i}]: {msg_or_ev}"
+                    )
+                    return json.dumps(
+                        {"success": False, "message": f"events[{i}]: {msg_or_ev}", "data": None},
+                        ensure_ascii=False,
+                    )
+                normalized.append(msg_or_ev)
+            self._enqueue_pet_events(device_id, normalized)
+            logger.info(f"[WebChannel] pet/event/send ok device={device_id!r} count={len(normalized)}")
+            return json.dumps({"success": True, "message": "ok", "data": None})
+        except json.JSONDecodeError:
+            logger.warning("[WebChannel] pet/event/send rejected: invalid JSON body")
+            return json.dumps({"success": False, "message": "invalid JSON body", "data": None})
+        except Exception as e:
+            logger.error(f"[WebChannel] send_pet_events error: {e}")
+            return json.dumps({"success": False, "message": str(e), "data": None})
+
+    def poll_pet_events(self):
+        """
+        GET /api/pet/event/poll — 消费事件（每条返回后从队列删除）。
+        传 ts 时：先丢弃所有 ts <= 查询参数的事件，再一次性取出并删除剩余全部；
+        不传 ts：从队头开始一次性取出并删除当前队列中全部事件。
+        """
+        try:
+            device_id = web.ctx.env.get("HTTP_X_DEVICE_ID", "").strip()
+            if not device_id:
+                logger.warning("[WebChannel] pet/event/poll rejected: missing x-device-id")
+                return json.dumps({"success": False, "message": "x-device-id header is required", "data": []})
+            params = web.input(ts=None)
+            ts_cutoff = None
+            if params.ts not in (None, ""):
+                try:
+                    ts_cutoff = float(params.ts)
+                except (TypeError, ValueError):
+                    logger.warning(f"[WebChannel] pet/event/poll rejected device={device_id!r}: bad ts={params.ts!r}")
+                    return json.dumps({"success": False, "message": "ts must be a number", "data": []})
+            out = []
+            with self._pet_event_lock:
+                q = self.pet_event_queues.get(device_id)
+                if not q:
+                    logger.debug(f"[WebChannel] pet/event/poll empty device={device_id!r}")
+                    return json.dumps({"success": True, "message": "ok", "data": []}, ensure_ascii=False)
+                if ts_cutoff is not None:
+                    while q and q[0]["ts"] <= ts_cutoff:
+                        q.popleft()
+                while q:
+                    out.append(q.popleft())
+            if out:
+                logger.info(
+                    f"[WebChannel] pet/event/poll device={device_id!r} ts_cutoff={ts_cutoff!r} delivered={len(out)}"
+                )
+            else:
+                logger.debug(
+                    f"[WebChannel] pet/event/poll device={device_id!r} ts_cutoff={ts_cutoff!r} delivered=0 (drained)"
+                )
+            return json.dumps({"success": True, "message": "ok", "data": out}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] poll_pet_events error: {e}")
             return json.dumps({"success": False, "message": str(e), "data": []})
 
     def pull_chatlog(self):
@@ -495,6 +617,8 @@ class WebChannel(ChatChannel):
             '/api/device/register', 'DeviceRegisterHandler',
             '/api/device', 'DeviceListHandler',
             '/api/chatlog/pull', 'ChatlogPullHandler',
+            '/api/pet/event/poll', 'PetEventPollHandler',
+            '/api/pet/event/send', 'PetEventSendHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -727,6 +851,20 @@ class ChatlogPullHandler:
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
         return WebChannel().pull_chatlog()
+
+
+class PetEventPollHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        return WebChannel().poll_pet_events()
+
+
+class PetEventSendHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        return WebChannel().send_pet_events()
 
 
 class AssetsHandler:
