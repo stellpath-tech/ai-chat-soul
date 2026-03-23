@@ -1,6 +1,20 @@
+import os
+
 from common.expired_dict import ExpiredDict
 from common.log import logger
 from config import conf
+
+
+def _load_agent_template() -> str:
+    """从 templates/AGENT.md 读取角色设定，作为 system prompt 默认值"""
+    templates_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
+    filepath = os.path.join(templates_dir, "AGENT.md")
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        logger.warning(f"[Session] Failed to load templates/AGENT.md: {e}")
+        return ""
 
 
 class Session(object):
@@ -8,7 +22,8 @@ class Session(object):
         self.session_id = session_id
         self.messages = []
         if system_prompt is None:
-            self.system_prompt = conf().get("character_desc", "")
+            character_desc = conf().get("character_desc", "")
+            self.system_prompt = character_desc if character_desc else _load_agent_template()
         else:
             self.system_prompt = system_prompt
 

@@ -53,7 +53,7 @@ available_setting = {
     "group_chat_exit_group": False,
 
     "expires_in_seconds": 3600,
-    "character_desc": "你是ChatGPT，一个由OpenAI训练的大型语言模型。",
+    "character_desc": "",
     "conversation_max_tokens": 1000,
     "rate_limit_chatgpt": 20,
     "rate_limit_dalle": 50,
