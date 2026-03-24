@@ -19,6 +19,20 @@ import mimetypes
 import threading
 import logging
 
+# POST /message：仅本轮追加到 Agent system，约定可选情绪前缀（需 config 中 agent=true）
+_WEB_MESSAGE_EMOTION_APPEND = """## Web 回复可选情绪前缀
+
+若需要向用户传递你当下的情绪，可在**整条回复最开头**（正文第一个字之前）加一个形如 $$xxx$$ 的情绪前缀。
+
+**你仅可选择以下情绪前缀：**
+- `$$HAPPY$$`（开心）
+- `$$SHY$$`（害羞）
+
+注意不要选择除上述情绪前缀外的任何词或格式，否则地球会毁灭。
+
+注意情绪前缀不要随便加， 大部分情况下不要加， 只有极少数情况需要表达i情绪，比如情绪足够鲜明，且与情绪极度相关时才需要添加；
+如果你在没有强烈相关情绪的情况下随意添加，我就不会给你小费，但如果你准确一点，我就会给你 200$ 小费"""
+
 class WebMessage(ChatMessage):
     def __init__(
         self,
@@ -464,6 +478,8 @@ class WebChannel(ChatChannel):
                 if use_sse:
                     context["on_event"] = self._make_sse_callback(request_id)
 
+                context["append_system_prompt"] = _WEB_MESSAGE_EMOTION_APPEND
+
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
 
@@ -495,6 +511,8 @@ class WebChannel(ChatChannel):
 
             if use_sse:
                 context["on_event"] = self._make_sse_callback(request_id)
+
+            context["append_system_prompt"] = _WEB_MESSAGE_EMOTION_APPEND
 
             # DEVICE 来源：将用户消息写入聊天记录队列
             if source == "DEVICE" and device_id:

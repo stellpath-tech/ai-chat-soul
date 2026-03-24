@@ -2,6 +2,7 @@ import json
 import os
 import time
 import threading
+from typing import Optional
 
 from common.log import logger
 from agent.protocol.models import LLMRequest, LLMModel
@@ -432,7 +433,14 @@ class Agent:
 
         return action
 
-    def run_stream(self, user_message: str, on_event=None, clear_history: bool = False, skill_filter=None) -> str:
+    def run_stream(
+        self,
+        user_message: str,
+        on_event=None,
+        clear_history: bool = False,
+        skill_filter=None,
+        append_system: Optional[str] = None,
+    ) -> str:
         """
         Execute single agent task with streaming (based on tool-call)
 
@@ -448,6 +456,7 @@ class Agent:
                      event = {"type": str, "timestamp": float, "data": dict}
             clear_history: If True, clear conversation history before this call (default: False)
             skill_filter: Optional list of skill names to include in this run
+            append_system: If set, appended to the full system prompt for this run only (not persisted in agent.system_prompt)
 
         Returns:
             Final response text
@@ -471,6 +480,8 @@ class Agent:
 
         # Get full system prompt with skills
         full_system_prompt = self.get_full_system_prompt(skill_filter=skill_filter)
+        if append_system and str(append_system).strip():
+            full_system_prompt = f"{full_system_prompt}\n\n{str(append_system).strip()}"
 
         # Create a copy of messages for this execution to avoid concurrent modification
         # Record the original length to track which messages are new

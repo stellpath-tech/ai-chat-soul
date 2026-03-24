@@ -338,12 +338,15 @@ class AgentBridge:
                                 logger.warning(f"[AgentBridge] Failed to attach context to scheduler: {e}")
                             break
             
+            append_system = context.get("append_system_prompt") if context else None
+
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
                     user_message=query,
                     on_event=event_handler.handle_event,
-                    clear_history=clear_history
+                    clear_history=clear_history,
+                    append_system=append_system,
                 )
             finally:
                 # Restore original tools
