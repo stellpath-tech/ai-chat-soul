@@ -17,7 +17,7 @@ available_setting = {
     "claude_api_base": "https://api.anthropic.com/v1",
     "gemini_api_base": "https://generativelanguage.googleapis.com",
     "proxy": "",
-    "model": "gpt-3.5-turbo",
+    "model": "grok-3",
     "bot_type": "",
     "use_azure_chatgpt": False,
     "azure_deployment_id": "",

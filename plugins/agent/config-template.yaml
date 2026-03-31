@@ -10,7 +10,7 @@ tools:
 teams:
   # 通用智能体团队
   general_team:
-    model: "gpt-4.1-mini"        # 团队使用的模型
+    model: "grok-4-0709"        # 团队使用的模型
     description: "A versatile research and information agent team"
     max_steps: 5
     agents:
@@ -27,7 +27,7 @@ teams:
 
   # 软件开发智能体团队
   software_team:
-    model: "gpt-4.1-mini"
+    model: "grok-3"
     description: "A software development team with product manager, developer and tester."
     rule: "A normal R&D process should be that Product Manager writes PRD, Developer writes code based on PRD, and Finally, Tester performs testing."
     max_steps: 10

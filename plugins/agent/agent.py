@@ -260,6 +260,9 @@ class AgentPlugin(Plugin):
         elif model_name.startswith(("gpt", "text-davinci", "o1", "o3")):
             api_base = conf().get("open_ai_api_base") or "https://api.openai.com/v1"
             api_key = conf().get("open_ai_api_key")
+        elif model_name.startswith("grok"):
+            api_base = conf().get("grok_api_base") or "https://api.x.ai/v1"
+            api_key = conf().get("grok_api_key")
         elif model_name.startswith("claude"):
             return ClaudeModel(model=model_name, api_key=conf().get("claude_api_key"))
         elif model_name.startswith("moonshot"):
