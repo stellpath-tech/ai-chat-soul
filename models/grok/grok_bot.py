@@ -25,6 +25,7 @@ class GrokBot(MoonshotBot):
         }
         self.api_key = conf().get("grok_api_key")
         self.base_url = conf().get("grok_api_base", "https://api.x.ai/v1")
+        self.proxy = conf().get("proxy")
         if self.base_url.endswith("/chat/completions"):
             self.base_url = self.base_url.rsplit("/chat/completions", 1)[0]
         if self.base_url.endswith("/"):
@@ -75,7 +76,8 @@ class GrokBot(MoonshotBot):
             res = requests.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers,
-                json=body
+                json=body,
+                proxies={"http": self.proxy, "https": self.proxy} if self.proxy else None,
             )
             if res.status_code == 200:
                 response = res.json()
