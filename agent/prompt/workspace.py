@@ -81,6 +81,32 @@ def ensure_workspace(workspace_dir: str, create_templates: bool = True) -> Works
     )
 
 
+def overwrite_workspace_prompts(workspace_dir: str) -> WorkspaceFiles:
+    """
+    Force reset workspace prompt files from the repo templates.
+
+    This overwrites AGENT.md / USER.md / RULE.md in the target workspace so
+    that runtime-customized prompt files can be restored to the repository
+    defaults during a reset flow.
+    """
+    workspace_files = ensure_workspace(workspace_dir, create_templates=True)
+    template_pairs = [
+        (workspace_files.agent_path, _get_agent_template()),
+        (workspace_files.user_path, _get_user_template()),
+        (workspace_files.rule_path, _get_rule_template()),
+    ]
+
+    for filepath, content in template_pairs:
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info(f"[Workspace] Reset prompt template: {filepath}")
+        except Exception as e:
+            logger.warning(f"[Workspace] Failed to reset prompt template {filepath}: {e}")
+
+    return workspace_files
+
+
 def load_context_files(workspace_dir: str, files_to_load: Optional[List[str]] = None) -> List[ContextFile]:
     """
     加载工作空间的上下文文件

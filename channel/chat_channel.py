@@ -304,6 +304,7 @@ class ChatChannel(Channel):
         session_id = context.get("session_id")
         self._clear_short_term_memory(session_id)
         self._clear_long_term_memory()
+        self._reset_workspace_prompts(session_id)
 
         opening = conf().get(
             "reset_opening_message",
@@ -334,6 +335,25 @@ class ChatChannel(Channel):
                 bridge.get_agent_bridge().clear_session(session_id)
         except Exception as e:
             logger.warning(f"[chat_channel] clear agent session failed: {e}")
+
+    def _reset_workspace_prompts(self, session_id):
+        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        target_workspaces = [workspace_root]
+
+        if session_id:
+            target_workspaces.append(os.path.join(workspace_root, "devices", session_id))
+
+        try:
+            from agent.prompt.workspace import overwrite_workspace_prompts
+        except Exception as e:
+            logger.warning(f"[chat_channel] import overwrite_workspace_prompts failed: {e}")
+            return
+
+        for workspace_dir in target_workspaces:
+            try:
+                overwrite_workspace_prompts(workspace_dir)
+            except Exception as e:
+                logger.warning(f"[chat_channel] reset workspace prompts failed for {workspace_dir}: {e}")
 
     def _clear_long_term_memory(self):
         workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
