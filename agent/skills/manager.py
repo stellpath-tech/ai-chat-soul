@@ -27,12 +27,21 @@ class SkillManager:
         Initialize the skill manager.
 
         :param builtin_dir: Built-in skills directory (project root ``skills/``)
-        :param custom_dir: Custom skills directory (workspace ``skills/``)
+        :param custom_dir: Custom skills directory (agent workspace ``skills/``)
         :param config: Configuration dictionary
         """
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        
+        # Built-in skills are global and read-only
         self.builtin_dir = builtin_dir or os.path.join(project_root, 'skills')
-        self.custom_dir = custom_dir or os.path.join(project_root, 'workspace', 'skills')
+        
+        # Custom skills MUST be session-specific. If not provided, fallback to a local workspace (but this should be avoided)
+        if custom_dir:
+            self.custom_dir = custom_dir
+        else:
+            self.custom_dir = os.path.join(project_root, 'workspace', 'skills')
+            logger.warning(f"[SkillManager] No custom_dir provided, falling back to global workspace: {self.custom_dir}")
+            
         self.config = config or {}
         self._skills_config_path = os.path.join(self.custom_dir, SKILLS_CONFIG_FILE)
 

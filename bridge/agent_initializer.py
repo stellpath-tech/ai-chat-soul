@@ -85,8 +85,8 @@ class AgentInitializer:
         # Load context files from agent workspace
         context_files = load_context_files(agent_workspace)
         
-        # Skills are shared from global workspace_root
-        skill_manager = self._initialize_skill_manager(workspace_root, session_id)
+        # Skills are isolated in the agent's specific workspace
+        skill_manager = self._initialize_skill_manager(agent_workspace, session_id)
         
         # Check if first conversation
         from agent.prompt.workspace import is_first_conversation, mark_conversation_started
