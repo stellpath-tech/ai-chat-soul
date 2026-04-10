@@ -90,13 +90,10 @@ class AgentInitializer:
         is_first = is_first_conversation(agent_workspace)
 
         # Build system prompt：
-        #   - agent.md + user.md 仅首次对话注入（写入静态 system_prompt）
+        #   - agent.md + user.md 每次启动都注入（人设和用户信息必须始终存在）
         #   - rule.md 每轮动态注入（由 agent.get_full_system_prompt() 实时读取）
         from agent.prompt.builder import build_companion_system_prompt
-        if is_first:
-            first_turn_files = load_context_files(agent_workspace, ["AGENT.md", "USER.md"])
-        else:
-            first_turn_files = []
+        first_turn_files = load_context_files(agent_workspace, ["AGENT.md", "USER.md"])
 
         system_prompt = build_companion_system_prompt(first_turn_files)
         runtime_info = self._get_runtime_info(agent_workspace)
