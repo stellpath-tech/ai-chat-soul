@@ -50,7 +50,7 @@ class MemoryConfig:
     
     # Memory flush config (独立于模型 context window)
     flush_token_threshold: int = 50000  # 50K tokens 触发 flush
-    flush_turn_threshold: int = 20  # 20 轮对话触发 flush (用户+AI各一条为一轮)
+    flush_turn_threshold: int = 10  # 10 轮对话触发 flush (用户+AI各一条为一轮)
     
     def get_workspace(self) -> Path:
         """Get workspace root directory"""

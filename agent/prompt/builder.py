@@ -150,6 +150,32 @@ def build_agent_system_prompt(
     return "\n".join(sections)
 
 
+def build_companion_system_prompt(
+    first_turn_files: Optional[List[ContextFile]] = None,
+) -> str:
+    """
+    简化版系统提示词构建器，专为伴侣/角色扮演场景设计。
+
+    注入策略：
+    - first_turn_files（agent.md + user.md）：仅首次对话注入，写进返回的静态 prompt
+    - rule.md：每轮动态注入，由 Agent.get_full_system_prompt() 实时读取拼入，此处不处理
+
+    与 build_agent_system_prompt 的区别：
+    - 不包含工具系统、技能系统、记忆系统、工作空间、运行时等框架章节
+    - 只输出 .md 文件的原始内容，保持 prompt 轻量
+    """
+    if not first_turn_files:
+        return ""
+
+    sections = []
+    for f in first_turn_files:
+        if f.content.strip():
+            sections.append(f.content.strip())
+            sections.append("")
+
+    return "\n".join(sections).strip()
+
+
 def _build_identity_section(base_persona: Optional[str], language: str) -> List[str]:
     """构建基础身份section - 不再需要，身份由AGENT.md定义"""
     # 不再生成基础身份section，完全由AGENT.md定义

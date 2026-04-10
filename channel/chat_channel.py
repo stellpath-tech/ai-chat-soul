@@ -247,26 +247,17 @@ class ChatChannel(Channel):
                 if conf().get("image_recognition", True):
                     use_agent_for_image = conf().get("image_use_agent", True) and conf().get("agent", False)
                     if use_agent_for_image:
-                        # Stage 1: use vision-capable model adapter to parse image content.
-                        base_vision_reply = Bridge().fetch_reply_content(image_path, context)
-                        if base_vision_reply and base_vision_reply.type != ReplyType.ERROR:
-                            # Stage 2: let agent rephrase with persona + conversation context.
-                            # Prefer user-supplied caption; fall back to config default.
-                            image_caption = context.get("image_caption", "")
-                            prompt = image_caption or conf().get(
-                                "image_agent_prompt",
-                                "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。"
-                            )
-                            agent_context = Context(
-                                ContextType.TEXT,
-                                f"{prompt}\n\n图片识别结果：\n{base_vision_reply.content}",
-                                dict(context.kwargs)
-                            )
-                            agent_context["origin_ctype"] = ContextType.IMAGE
-                            agent_context["image_feedback_mode"] = True
-                            vision_reply = super().build_reply_content(agent_context.content, agent_context)
-                        else:
-                            vision_reply = base_vision_reply
+                        # Inject image directly into agent — agent sees the raw image via image_url block.
+                        image_caption = context.get("image_caption", "")
+                        prompt = image_caption or conf().get(
+                            "image_agent_prompt",
+                            "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。"
+                        )
+                        agent_context = Context(ContextType.TEXT, prompt, dict(context.kwargs))
+                        agent_context["origin_ctype"] = ContextType.IMAGE
+                        agent_context["image_feedback_mode"] = True
+                        agent_context["image_path"] = image_path  # passed to _build_image_content
+                        vision_reply = super().build_reply_content(agent_context.content, agent_context)
                     else:
                         vision_reply = Bridge().fetch_reply_content(image_path, context)
                     if vision_reply and vision_reply.type != ReplyType.ERROR:

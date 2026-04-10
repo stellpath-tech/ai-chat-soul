@@ -1,256 +1,287 @@
 """
-Memory flush manager
+Memory extractor
 
-Triggers memory flush before context compaction (similar to clawdbot)
+Triggers a lightweight LLM extraction every N turns to update MEMORY.md.
+No agent tool-calling involved — writes the file directly in Python.
 """
 
-from typing import Optional, Callable, Any
+import json
+import os
+from typing import Optional, List, Dict
 from pathlib import Path
 from datetime import datetime
 
 
+_EXTRACTION_SYSTEM_PROMPT = """\
+你是一个记忆提取助手，负责从对话中提取用户的关键信息并更新记忆文件。
+
+你的任务是从给定的对话历史中提取以下三类信息：
+1. **身份信息**：用户的姓名、职业、年龄、所在城市等基本身份信息
+2. **偏好信息**：用户喜欢/不喜欢的事物、习惯、口味等
+3. **关键事件**：用户提到的重要事件、经历、情绪转折点等
+
+要求：
+- 只提取对话中实际出现的信息，不要编造或推断
+- 每条信息简洁，控制在20字以内
+- 如果某类信息为空，返回空列表
+- 返回 JSON，格式如下：
+{
+  "identity": ["姓名：小雨", "职业：学生"],
+  "preferences": ["喜欢草莓蛋糕", "有一只橘猫叫奶茶"],
+  "key_events": ["2024-01 考试没考好，复习很久但结果不理想"]
+}
+"""
+
+_EXTRACTION_USER_TEMPLATE = """\
+请从以下最近的对话历史中提取关键信息：
+
+{conversation}
+
+返回 JSON，不要其他内容。
+"""
+
+
 class MemoryFlushManager:
     """
-    Manages memory flush operations before context compaction
-    
-    Similar to clawdbot's memory flush mechanism:
-    - Triggers when context approaches token limit
-    - Runs a silent agent turn to write memories to disk
-    - Uses memory/YYYY-MM-DD.md for daily notes
-    - Uses MEMORY.md (workspace root) for long-term curated memories
+    Manages periodic memory extraction every N conversation turns.
+
+    Every `turn_threshold` turns, extracts identity/preferences/key_events
+    from recent conversation via a direct LLM API call, then writes the
+    result into MEMORY.md in the workspace directory.
     """
-    
+
     def __init__(
         self,
         workspace_dir: Path,
-        llm_model: Optional[Any] = None
+        llm_model=None,  # unused, kept for interface compatibility
     ):
-        """
-        Initialize memory flush manager
-        
-        Args:
-            workspace_dir: Workspace directory
-            llm_model: LLM model for agent execution (optional)
-        """
         self.workspace_dir = workspace_dir
-        self.llm_model = llm_model
-        
         self.memory_dir = workspace_dir / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Tracking
+
         self.last_flush_token_count: Optional[int] = None
         self.last_flush_timestamp: Optional[datetime] = None
-        self.turn_count: int = 0  # 对话轮数计数器
-    
+        self.turn_count: int = 0
+
+    # ── trigger logic ────────────────────────────────────────────────────────
+
     def should_flush(
         self,
         current_tokens: int = 0,
         token_threshold: int = 50000,
-        turn_threshold: int = 20
+        turn_threshold: int = 10,  # 10 turns default
     ) -> bool:
-        """
-        Determine if memory flush should be triggered
-        
-        独立的 flush 触发机制，不依赖模型 context window:
-        - Token 阈值: 达到 50K tokens 时触发
-        - 轮次阈值: 达到 20 轮对话时触发
-        
-        Args:
-            current_tokens: Current session token count
-            token_threshold: Token threshold to trigger flush (default: 50K)
-            turn_threshold: Turn threshold to trigger flush (default: 20)
-            
-        Returns:
-            True if flush should run
-        """
-        # 检查 token 阈值
         if current_tokens > 0 and current_tokens >= token_threshold:
-            # 避免重复 flush
             if self.last_flush_token_count is not None:
                 if current_tokens <= self.last_flush_token_count + 5000:
                     return False
             return True
-        
-        # 检查轮次阈值
         if self.turn_count >= turn_threshold:
             return True
-        
         return False
-    
+
+    def increment_turn(self):
+        self.turn_count += 1
+
+    # ── path helpers ─────────────────────────────────────────────────────────
+
     def get_today_memory_file(self, user_id: Optional[str] = None) -> Path:
-        """
-        Get today's memory file path: memory/YYYY-MM-DD.md
-        
-        Args:
-            user_id: Optional user ID for user-specific memory
-            
-        Returns:
-            Path to today's memory file
-        """
         today = datetime.now().strftime("%Y-%m-%d")
-        
         if user_id:
-            user_dir = self.memory_dir / "users" / user_id
-            user_dir.mkdir(parents=True, exist_ok=True)
-            return user_dir / f"{today}.md"
-        else:
-            return self.memory_dir / f"{today}.md"
-    
+            d = self.memory_dir / "users" / user_id
+            d.mkdir(parents=True, exist_ok=True)
+            return d / f"{today}.md"
+        return self.memory_dir / f"{today}.md"
+
     def get_main_memory_file(self, user_id: Optional[str] = None) -> Path:
-        """
-        Get main memory file path: MEMORY.md (workspace root)
-        
-        Args:
-            user_id: Optional user ID for user-specific memory
-            
-        Returns:
-            Path to main memory file
-        """
         if user_id:
-            user_dir = self.memory_dir / "users" / user_id
-            user_dir.mkdir(parents=True, exist_ok=True)
-            return user_dir / "MEMORY.md"
-        else:
-            # Return workspace root MEMORY.md
-            return Path(self.workspace_dir) / "MEMORY.md"
-    
-    def create_flush_prompt(self) -> str:
+            d = self.memory_dir / "users" / user_id
+            d.mkdir(parents=True, exist_ok=True)
+            return d / "MEMORY.md"
+        return Path(self.workspace_dir) / "MEMORY.md"
+
+    # ── LLM call ─────────────────────────────────────────────────────────────
+
+    def _call_llm_extract(self, conversation_text: str) -> Optional[Dict]:
         """
-        Create prompt for memory flush turn
-        
-        Similar to clawdbot's DEFAULT_MEMORY_FLUSH_PROMPT
+        Call LLM via OpenAI-compatible chat completions to extract memories.
+        Returns parsed dict or None on failure.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        return (
-            f"Pre-compaction memory flush. "
-            f"Store durable memories now (use memory/{today}.md for daily notes; "
-            f"create memory/ if needed). "
-            f"\n\n"
-            f"重要提示:\n"
-            f"- MEMORY.md: 记录最核心、最常用的信息（例如重要规则、偏好、决策、要求等）\n"
-            f"  如果 MEMORY.md 过长，可以精简或移除不再重要的内容。避免冗长描述，用关键词和要点形式记录\n"
-            f"- memory/{today}.md: 记录当天发生的事件、关键信息、经验教训、对话过程摘要等，突出重点\n"
-            f"- 如果没有重要内容需要记录，回复 NO_REPLY\n"
-        )
-    
-    def create_flush_system_prompt(self) -> str:
+        import requests
+
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_base = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+        model = os.environ.get("MEMORY_EXTRACT_MODEL", "gpt-4o-mini")
+
+        if not api_key or api_key in ("", "YOUR API KEY", "YOUR_API_KEY"):
+            from common.log import logger
+            logger.warning("[MemoryExtractor] No OPENAI_API_KEY, skipping extraction")
+            return None
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": _EXTRACTION_USER_TEMPLATE.format(
+                    conversation=conversation_text
+                )},
+            ],
+            "temperature": 0.0,
+            "max_tokens": 800,
+        }
+
+        try:
+            resp = requests.post(
+                f"{api_base}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            # Strip markdown code fences if present
+            if content.startswith("```"):
+                content = content.split("```")[1]
+                if content.startswith("json"):
+                    content = content[4:]
+            return json.loads(content)
+        except Exception as e:
+            from common.log import logger
+            logger.warning(f"[MemoryExtractor] LLM call failed: {e}")
+            return None
+
+    # ── MEMORY.md update ─────────────────────────────────────────────────────
+
+    def _update_memory_md(self, extracted: Dict, memory_path: Path):
         """
-        Create system prompt for memory flush turn
-        
-        Similar to clawdbot's DEFAULT_MEMORY_FLUSH_SYSTEM_PROMPT
+        Merge extracted memories into MEMORY.md.
+
+        The file is structured as three sections; we append new items that
+        are not already present (simple string-match dedup).
         """
-        return (
-            "Pre-compaction memory flush turn. "
-            "The session is near auto-compaction; capture durable memories to disk. "
-            "\n\n"
-            "记忆写入原则:\n"
-            "1. MEMORY.md 精简原则: 只记录核心信息（<2000 tokens）\n"
-            "   - 记录重要规则、偏好、决策、要求等需要长期记住的关键信息，无需记录过多细节\n"
-            "   - 如果 MEMORY.md 过长，可以根据需要精简或删除过时内容\n"
-            "\n"
-            "2. 天级记忆 (memory/YYYY-MM-DD.md):\n"
-            "   - 记录当天的重要事件、关键信息、经验教训、对话过程摘要等，确保核心信息点被完整记录\n"
-            "\n"
-            "3. 判断标准:\n"
-            "   - 这个信息未来会经常用到吗？→ MEMORY.md\n"
-            "   - 这是今天的重要事件或决策吗？→ memory/YYYY-MM-DD.md\n"
-            "   - 这是临时性的、不重要的内容吗？→ 不记录\n"
-            "\n"
-            "You may reply, but usually NO_REPLY is correct."
-        )
-    
+        identity_new = extracted.get("identity", [])
+        prefs_new = extracted.get("preferences", [])
+        events_new = extracted.get("key_events", [])
+
+        if not any([identity_new, prefs_new, events_new]):
+            return  # nothing to write
+
+        # Read existing content
+        existing = memory_path.read_text(encoding="utf-8") if memory_path.exists() else ""
+
+        def _merge_section(header: str, new_items: List[str], text: str) -> str:
+            """Append new_items under header, skipping duplicates."""
+            if not new_items:
+                return text
+            # Ensure header exists
+            if header not in text:
+                text = text.rstrip() + f"\n\n## {header}\n"
+            for item in new_items:
+                item = item.strip()
+                if item and item not in text:
+                    # Insert before next ## header or at end of section
+                    idx = text.find(f"\n## ", text.find(f"## {header}") + 1)
+                    entry = f"- {item}\n"
+                    if idx == -1:
+                        text = text.rstrip() + "\n" + entry
+                    else:
+                        text = text[:idx] + entry + text[idx:]
+            return text
+
+        result = existing
+        result = _merge_section("身份信息", identity_new, result)
+        result = _merge_section("偏好与习惯", prefs_new, result)
+        result = _merge_section("关键事件", events_new, result)
+
+        memory_path.write_text(result, encoding="utf-8")
+
+    # ── main entry point ─────────────────────────────────────────────────────
+
     async def execute_flush(
         self,
-        agent_executor: Callable,
-        current_tokens: int,
+        messages: List[Dict],
+        current_tokens: int = 0,
         user_id: Optional[str] = None,
-        **executor_kwargs
     ) -> bool:
         """
-        Execute memory flush by running a silent agent turn
-        
+        Extract memories from recent conversation and write to MEMORY.md.
+
         Args:
-            agent_executor: Function to execute agent with prompt
-            current_tokens: Current token count
-            user_id: Optional user ID
-            **executor_kwargs: Additional kwargs for agent executor
-            
+            messages: Recent conversation messages (list of {role, content})
+            current_tokens: Current token count (for tracking)
+            user_id: Optional user ID for per-user memory files
+
         Returns:
-            True if flush completed successfully
+            True if extraction completed successfully
         """
+        from common.log import logger
+
         try:
-            # Create flush prompts
-            prompt = self.create_flush_prompt()
-            system_prompt = self.create_flush_system_prompt()
-            
-            # Execute agent turn (silent, no user-visible reply expected)
-            await agent_executor(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                silent=True,  # NO_REPLY expected
-                **executor_kwargs
-            )
-            
-            # Track flush
+            # Build plain-text conversation for the LLM
+            lines = []
+            for msg in messages[-20:]:  # last 20 messages (~10 turns)
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Extract text parts from structured content
+                    content = " ".join(
+                        p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                if role in ("user", "assistant") and content.strip():
+                    label = "用户" if role == "user" else "满仓"
+                    lines.append(f"{label}: {content.strip()}")
+
+            if not lines:
+                return False
+
+            conversation_text = "\n".join(lines)
+            extracted = self._call_llm_extract(conversation_text)
+
+            if extracted:
+                memory_path = self.get_main_memory_file(user_id)
+                self._update_memory_md(extracted, memory_path)
+                logger.info(
+                    f"[MemoryExtractor] Updated MEMORY.md: "
+                    f"identity={len(extracted.get('identity', []))}, "
+                    f"prefs={len(extracted.get('preferences', []))}, "
+                    f"events={len(extracted.get('key_events', []))}"
+                )
+
             self.last_flush_token_count = current_tokens
             self.last_flush_timestamp = datetime.now()
-            self.turn_count = 0  # 重置轮数计数器
-            
+            self.turn_count = 0
             return True
-            
+
         except Exception as e:
-            print(f"Memory flush failed: {e}")
+            from common.log import logger
+            logger.warning(f"[MemoryExtractor] Extraction failed: {e}")
             return False
-    
-    def increment_turn(self):
-        """增加对话轮数计数"""
-        self.turn_count += 1
-    
+
     def get_status(self) -> dict:
-        """Get memory flush status"""
         return {
-            'last_flush_tokens': self.last_flush_token_count,
-            'last_flush_time': self.last_flush_timestamp.isoformat() if self.last_flush_timestamp else None,
-            'today_file': str(self.get_today_memory_file()),
-            'main_file': str(self.get_main_memory_file())
+            "last_flush_tokens": self.last_flush_token_count,
+            "last_flush_time": self.last_flush_timestamp.isoformat() if self.last_flush_timestamp else None,
+            "turn_count": self.turn_count,
+            "today_file": str(self.get_today_memory_file()),
+            "main_file": str(self.get_main_memory_file()),
         }
 
 
 def create_memory_files_if_needed(workspace_dir: Path, user_id: Optional[str] = None):
-    """
-    Create default memory files if they don't exist
-    
-    Args:
-        workspace_dir: Workspace directory
-        user_id: Optional user ID for user-specific files
-    """
+    """Create default memory files if they don't exist"""
     memory_dir = workspace_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create main MEMORY.md in workspace root
+
     if user_id:
         user_dir = memory_dir / "users" / user_id
         user_dir.mkdir(parents=True, exist_ok=True)
         main_memory = user_dir / "MEMORY.md"
     else:
         main_memory = Path(workspace_dir) / "MEMORY.md"
-    
+
     if not main_memory.exists():
-        # Create empty file or with minimal structure (no obvious "Memory" header)
-        # Following clawdbot's approach: memories should blend naturally into context
-        main_memory.write_text("")
-    
-    # Create today's memory file
-    today = datetime.now().strftime("%Y-%m-%d")
-    if user_id:
-        user_dir = memory_dir / "users" / user_id
-        today_memory = user_dir / f"{today}.md"
-    else:
-        today_memory = memory_dir / f"{today}.md"
-    
-    if not today_memory.exists():
-        today_memory.write_text(
-            f"# Daily Memory: {today}\n\n"
-            f"Day-to-day notes and running context.\n\n"
-        )
+        main_memory.write_text("", encoding="utf-8")

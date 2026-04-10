@@ -391,42 +391,25 @@ class MemoryManager:
     
     async def execute_memory_flush(
         self,
-        agent_executor,
-        current_tokens: int,
+        messages: List[Dict[str, Any]],
+        current_tokens: int = 0,
         user_id: Optional[str] = None,
-        **executor_kwargs
     ) -> bool:
         """
-        Execute memory flush before compaction
-        
-        This runs a silent agent turn to write durable memories to disk.
-        Similar to clawdbot's pre-compaction memory flush.
-        
+        Extract memories from recent conversation and write to MEMORY.md.
+
         Args:
-            agent_executor: Async function to execute agent with prompt
+            messages: Recent conversation messages passed from the agent
             current_tokens: Current session token count
             user_id: Optional user ID
-            **executor_kwargs: Additional kwargs for agent executor
-            
+
         Returns:
-            True if flush completed successfully
-            
-        Example:
-            >>> async def run_agent(prompt, system_prompt, silent=False):
-            ...     # Your agent execution logic
-            ...     pass
-            >>> 
-            >>> if manager.should_flush_memory(current_tokens=100000):
-            ...     await manager.execute_memory_flush(
-            ...         agent_executor=run_agent,
-            ...         current_tokens=100000
-            ...     )
+            True if extraction completed successfully
         """
         success = await self.flush_manager.execute_flush(
-            agent_executor=agent_executor,
+            messages=messages,
             current_tokens=current_tokens,
             user_id=user_id,
-            **executor_kwargs
         )
         
         if success:

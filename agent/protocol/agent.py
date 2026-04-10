@@ -53,6 +53,7 @@ class Agent:
         self.workspace_dir = workspace_dir  # Workspace directory
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
+        self.rule_path: Optional[str] = None  # RULE.md path for per-turn dynamic injection
         
         # Initialize skill manager
         self.skill_manager = None
@@ -101,23 +102,43 @@ class Agent:
     
     def get_full_system_prompt(self, skill_filter=None) -> str:
         """
-        Get the full system prompt including skills.
+        Get the full system prompt for the current turn.
 
-        Note: Skills are now built into the system prompt by PromptBuilder,
-        so we just return the base prompt directly. This method is kept for
-        backward compatibility.
-
-        :param skill_filter: Optional list of skill names to include (deprecated)
-        :return: Complete system prompt
+        Injection strategy:
+        - self.system_prompt: static base (agent.md + user.md, first turn only)
+        - rule.md: dynamically reloaded and appended on every turn via self.rule_path
         """
         prompt = self.system_prompt
 
-        # Rebuild tool list section to reflect current self.tools
-        prompt = self._rebuild_tool_list_section(prompt)
+        # Per-turn: reload and append RULE.md
+        if self.rule_path and os.path.exists(self.rule_path):
+            try:
+                with open(self.rule_path, 'r', encoding='utf-8') as f:
+                    rule_content = f.read().strip()
+                if rule_content:
+                    prompt = (prompt + "\n\n" + rule_content) if prompt else rule_content
+            except Exception as e:
+                logger.warning(f"[Agent] Failed to reload RULE.md: {e}")
 
-        # If runtime_info contains dynamic time function, rebuild runtime section
-        if self.runtime_info and callable(self.runtime_info.get('_get_current_time')):
-            prompt = self._rebuild_runtime_section(prompt)
+        # Per-turn: inject current time + season from runtime_info
+        if self.runtime_info and callable(self.runtime_info.get("_get_current_time")):
+            try:
+                time_info = self.runtime_info["_get_current_time"]()
+                month = int(time_info["time"][5:7])
+                season = {
+                    12: "冬天", 1: "冬天", 2: "冬天",
+                    3: "春天", 4: "春天", 5: "春天",
+                    6: "夏天", 7: "夏天", 8: "夏天",
+                    9: "秋天", 10: "秋天", 11: "秋天",
+                }.get(month, "")
+                season_note = f"（{season}）" if season else ""
+                time_line = (
+                    f"当前时间：{time_info['time']} {time_info['weekday']}"
+                    f" ({time_info['timezone']}){season_note}"
+                )
+                prompt = (prompt + "\n\n" + time_line) if prompt else time_line
+            except Exception as e:
+                logger.warning(f"[Agent] Failed to inject time info: {e}")
 
         return prompt
     
@@ -435,7 +456,7 @@ class Agent:
 
     def run_stream(
         self,
-        user_message: str,
+        user_message,  # str or list of content blocks (for multimodal)
         on_event=None,
         clear_history: bool = False,
         skill_filter=None,

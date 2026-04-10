@@ -17,6 +17,21 @@ from common.utils import expand_path
 from models.openai_compatible_bot import OpenAICompatibleBot
 
 
+def _build_image_content(text: str, image_path: str) -> list:
+    """Build an OpenAI-compatible multimodal content list with text + image_url block."""
+    import base64
+    ext = os.path.splitext(image_path)[1].lower()
+    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/jpeg")
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    content = []
+    if text and text.strip():
+        content.append({"type": "text", "text": text.strip()})
+    content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+    return content
+
+
 def add_openai_compatible_support(bot_instance):
     """
     Dynamically add OpenAI-compatible tool calling support to a bot instance.
@@ -340,10 +355,18 @@ class AgentBridge:
             
             append_system = context.get("append_system_prompt") if context else None
 
+            # Build user_message: multimodal content list when an image is present
+            image_path = context.get("image_path") if context else None
+            if image_path and os.path.exists(image_path):
+                user_message = _build_image_content(query, image_path)
+                logger.info(f"[AgentBridge] Injecting image into agent message: {image_path}")
+            else:
+                user_message = query
+
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
-                    user_message=query,
+                    user_message=user_message,
                     on_event=event_handler.handle_event,
                     clear_history=clear_history,
                     append_system=append_system,

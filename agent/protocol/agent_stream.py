@@ -177,18 +177,17 @@ class AgentStreamExecutor:
             Final response text
         """
         # Log user message with model info
-        logger.info(f"🤖 {self.model.model} | 👤 {user_message}")
-        
-        # Add user message (Claude format - use content blocks for consistency)
-        self.messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": user_message
-                }
-            ]
-        })
+        _log_text = user_message if isinstance(user_message, str) else next(
+            (p.get("text", "") for p in user_message if isinstance(p, dict) and p.get("type") == "text"), ""
+        )
+        logger.info(f"🤖 {self.model.model} | 👤 {_log_text}")
+
+        # Add user message — supports plain str or pre-built content block list (multimodal)
+        if isinstance(user_message, list):
+            user_content = user_message
+        else:
+            user_content = [{"type": "text", "text": user_message}]
+        self.messages.append({"role": "user", "content": user_content})
 
         self._emit_event("agent_start")
 
@@ -201,8 +200,7 @@ class AgentStreamExecutor:
                 logger.info(f"[Agent] 第 {turn} 轮")
                 self._emit_event("turn_start", {"turn": turn})
 
-                # Check if memory flush is needed (before calling LLM)
-                # 使用独立的 flush 阈值（50K tokens 或 20 轮）
+                # Check if memory extraction is needed (every 10 turns)
                 if self.agent.memory_manager and hasattr(self.agent, 'last_usage'):
                     usage = self.agent.last_usage
                     if usage and 'input_tokens' in usage:
@@ -215,11 +213,29 @@ class AgentStreamExecutor:
                                 "current_tokens": current_tokens,
                                 "turn_count": self.agent.memory_manager.flush_manager.turn_count
                             })
-
-                            # TODO: Execute memory flush in background
-                            # This would require async support
                             logger.info(
-                                f"Memory flush recommended: tokens={current_tokens}, turns={self.agent.memory_manager.flush_manager.turn_count}")
+                                f"[Agent] Triggering memory extraction: turns={self.agent.memory_manager.flush_manager.turn_count}"
+                            )
+                            # Fire-and-forget: run extraction in background without blocking the response
+                            import asyncio
+                            try:
+                                loop = asyncio.get_event_loop()
+                                if loop.is_running():
+                                    asyncio.ensure_future(
+                                        self.agent.memory_manager.execute_memory_flush(
+                                            messages=list(self.messages),
+                                            current_tokens=current_tokens,
+                                        )
+                                    )
+                                else:
+                                    loop.run_until_complete(
+                                        self.agent.memory_manager.execute_memory_flush(
+                                            messages=list(self.messages),
+                                            current_tokens=current_tokens,
+                                        )
+                                    )
+                            except Exception as _me:
+                                logger.warning(f"[Agent] Memory extraction scheduling failed: {_me}")
 
                 # Call LLM (enable retry_on_empty for better reliability)
                 assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=True)

@@ -82,29 +82,25 @@ class AgentInitializer:
         # Initialize scheduler if needed
         self._initialize_scheduler(tools, session_id)
         
-        # Load context files from agent workspace
-        context_files = load_context_files(agent_workspace)
-        
         # Skills are isolated in the agent's specific workspace
         skill_manager = self._initialize_skill_manager(agent_workspace, session_id)
-        
+
         # Check if first conversation
         from agent.prompt.workspace import is_first_conversation, mark_conversation_started
         is_first = is_first_conversation(agent_workspace)
-        
-        # Build system prompt
-        prompt_builder = PromptBuilder(workspace_dir=agent_workspace, language="zh")
+
+        # Build system prompt：
+        #   - agent.md + user.md 仅首次对话注入（写入静态 system_prompt）
+        #   - rule.md 每轮动态注入（由 agent.get_full_system_prompt() 实时读取）
+        from agent.prompt.builder import build_companion_system_prompt
+        if is_first:
+            first_turn_files = load_context_files(agent_workspace, ["AGENT.md", "USER.md"])
+        else:
+            first_turn_files = []
+
+        system_prompt = build_companion_system_prompt(first_turn_files)
         runtime_info = self._get_runtime_info(agent_workspace)
-        
-        system_prompt = prompt_builder.build(
-            tools=tools,
-            context_files=context_files,
-            skill_manager=skill_manager,
-            memory_manager=memory_manager,
-            runtime_info=runtime_info,
-            is_first_conversation=is_first
-        )
-        
+
         if is_first:
             mark_conversation_started(agent_workspace)
         
@@ -123,9 +119,12 @@ class AgentInitializer:
             skill_manager=skill_manager,
             enable_skills=True,
             max_context_tokens=max_context_tokens,
-            runtime_info=runtime_info  # Pass runtime_info for dynamic time updates
+            runtime_info=runtime_info
         )
-        
+
+        # rule.md 每轮动态注入：设置路径，由 get_full_system_prompt() 实时读取
+        agent.rule_path = workspace_files.rule_path
+
         # Attach memory manager
         if memory_manager:
             agent.memory_manager = memory_manager
