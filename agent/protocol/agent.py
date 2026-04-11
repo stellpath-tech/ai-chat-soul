@@ -54,6 +54,7 @@ class Agent:
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
         self.rule_path: Optional[str] = None  # RULE.md path for per-turn dynamic injection
+        self.user_message_prefix: Optional[str] = None  # USER.md content prepended to first user message
         
         # Initialize skill manager
         self.skill_manager = None
@@ -105,8 +106,9 @@ class Agent:
         Get the full system prompt for the current turn.
 
         Injection strategy:
-        - self.system_prompt: static base (agent.md + user.md, first turn only)
-        - rule.md: dynamically reloaded and appended on every turn via self.rule_path
+        - self.system_prompt: static base (agent.md only → system message)
+        - rule.md: dynamically reloaded and appended on every turn via self.rule_path (→ system)
+        - user_message_prefix: user.md prepended to first user message (→ user message)
         """
         prompt = self.system_prompt
 

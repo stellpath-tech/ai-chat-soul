@@ -90,12 +90,15 @@ class AgentInitializer:
         is_first = is_first_conversation(agent_workspace)
 
         # Build system prompt：
-        #   - agent.md + user.md 每次启动都注入（人设和用户信息必须始终存在）
+        #   - agent.md + rule.md → system 消息（角色定义 + 行为规则，权重高）
+        #   - user.md → user 消息前缀（用户背景信息，由 run_stream() 首轮注入）
         #   - rule.md 每轮动态注入（由 agent.get_full_system_prompt() 实时读取）
         from agent.prompt.builder import build_companion_system_prompt
-        first_turn_files = load_context_files(agent_workspace, ["AGENT.md", "USER.md"])
+        agent_files = load_context_files(agent_workspace, ["AGENT.md"])
+        user_files  = load_context_files(agent_workspace, ["USER.md"])
 
-        system_prompt = build_companion_system_prompt(first_turn_files)
+        system_prompt = build_companion_system_prompt(agent_files)
+        user_prefix = build_companion_system_prompt(user_files) if user_files else ""
         runtime_info = self._get_runtime_info(agent_workspace)
 
         if is_first:
@@ -121,6 +124,10 @@ class AgentInitializer:
 
         # rule.md 每轮动态注入：设置路径，由 get_full_system_prompt() 实时读取
         agent.rule_path = workspace_files.rule_path
+
+        # user.md → user 消息前缀：首轮对话时由 run_stream() 拼入 user 消息
+        if user_prefix:
+            agent.user_message_prefix = user_prefix
 
         # Attach memory manager
         if memory_manager:
