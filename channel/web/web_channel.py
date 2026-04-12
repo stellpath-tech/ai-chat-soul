@@ -18,6 +18,7 @@ import os
 import mimetypes
 import threading
 import logging
+import channel.web.database as db
 
 # POST /message：仅本轮追加到 Agent system，约定可选情绪前缀（需 config 中 agent=true）
 _WEB_MESSAGE_EMOTION_APPEND = """## Web 回复可选情绪前缀
@@ -422,16 +423,31 @@ class WebChannel(ChatChannel):
             # 读取请求来源相关 headers
             device_id = web.ctx.env.get("HTTP_X_DEVICE_ID", "").strip()
             source = web.ctx.env.get("HTTP_SOURCE", "APP").strip().upper()
+            auth_token = web.ctx.env.get("HTTP_X_AUTH_TOKEN", "").strip()
+            
             if source not in ("DEVICE", "APP"):
                 source = "APP"
 
             data = web.data()
             json_data = json.loads(data)
-            # 如果携带了 x-device-id，则以 device_id 作为 session，实现记忆隔离
-            if device_id:
-                session_id = device_id
-            else:
-                session_id = json_data.get('session_id', f'session_{int(time.time())}')
+            
+            # 优先使用 token 解析出的 user_id 作为 session
+            session_id = None
+            if auth_token:
+                user = db.get_user_by_token(auth_token)
+                if user:
+                    session_id = f"user_{user['id']}"
+                else:
+                    web.ctx.status = '401 Unauthorized'
+                    return json.dumps({"status": "error", "message": "unauthorized", "code": 401})
+                    
+            if not session_id:
+                # 如果没有 token 或 token 无效，回退到原逻辑
+                if device_id:
+                    session_id = device_id
+                else:
+                    session_id = json_data.get('session_id', f'session_{int(time.time())}')
+                    
             prompt = json_data.get('message', '')
             image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
             image_type = json_data.get('image_type', 'jpeg')  # 图片格式，默认 jpeg
@@ -597,6 +613,7 @@ class WebChannel(ChatChannel):
 
     def startup(self):
         port = conf().get("web_port", 9899)
+        db.init_db()
 
         # 从磁盘恢复设备注册表
         self._load_device_registry()
@@ -637,6 +654,9 @@ class WebChannel(ChatChannel):
             '/api/chatlog/pull', 'ChatlogPullHandler',
             '/api/pet/event/poll', 'PetEventPollHandler',
             '/api/pet/event/send', 'PetEventSendHandler',
+            '/api/auth/register', 'AuthRegisterHandler',
+            '/api/invite_code', 'InviteCodeHandler',
+            '/api/user_behavior', 'UserBehaviorHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -883,6 +903,72 @@ class PetEventSendHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         web.header('Access-Control-Allow-Origin', '*')
         return WebChannel().send_pet_events()
+
+
+class AuthRegisterHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            data = json.loads(web.data())
+            phone_number = data.get('phoneNumber')
+            invite_code = data.get('inviteCode')
+            if not phone_number or not invite_code:
+                return json.dumps({"success": False, "message": "Missing phoneNumber or inviteCode", "data": None}, ensure_ascii=False)
+            
+            success, msg, token = db.register_or_login(phone_number, invite_code)
+            if not success:
+                return json.dumps({"success": False, "message": msg, "data": None}, ensure_ascii=False)
+            
+            return json.dumps({"success": True, "message": "Success", "data": {"token": token}}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"AuthRegisterHandler error: {e}")
+            return json.dumps({"success": False, "message": "Server error", "data": None})
+
+
+class InviteCodeHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            data = json.loads(web.data())
+            invite_code = data.get('inviteCode')
+            expire_at = data.get('expireAt')
+            if not invite_code or not expire_at:
+                return json.dumps({"success": False, "message": "Missing parameters", "data": None}, ensure_ascii=False)
+            
+            db.create_invite_code(invite_code, expire_at)
+            return json.dumps({"success": True, "message": "Success", "data": None}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"InviteCodeHandler error: {e}")
+            return json.dumps({"success": False, "message": "Server error", "data": None})
+
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            codes = db.list_invite_codes()
+            return json.dumps({"success": True, "message": "Success", "data": codes}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"InviteCodeHandler error: {e}")
+            return json.dumps({"success": False, "message": "Server error", "data": None})
+
+
+class UserBehaviorHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            data = json.loads(web.data())
+            messages = data.get('messages', [])
+            if not isinstance(messages, list):
+                return json.dumps({"success": False, "message": "Invalid format", "data": None}, ensure_ascii=False)
+            
+            db.log_behaviors(messages)
+            return json.dumps({"success": True, "message": "Success", "data": None}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"UserBehaviorHandler error: {e}")
+            return json.dumps({"success": False, "message": "Server error", "data": None})
 
 
 class AssetsHandler:
