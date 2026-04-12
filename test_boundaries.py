@@ -3,7 +3,7 @@ import json
 import time
 import urllib.error
 
-BASE_URL = "http://localhost:9899"
+BASE_URL = "http://36.103.199.211:9899"
 
 def request(method, path, data=None, headers=None):
     if headers is None:
@@ -43,7 +43,8 @@ assert res.get("message") == "内测码已过期", f"预期提示'内测码已�
 
 # 3. 创建一个有效的普通用户邀请码 (32位)
 print("\n[测试 3] 创建有效的普通用户邀请码 (valid_code_1)")
-valid_code_1 = "12345678901234561234567890123456"
+import uuid
+valid_code_1 = uuid.uuid4().hex
 request("POST", "/api/invite_code", {
     "inviteCode": valid_code_1,
     "expireAt": int(time.time() * 1000) + 3600000  # 1小时后过期
@@ -109,7 +110,7 @@ print("\n=== 所有边界测试通过 ===")
 # 10. 用户 A 再次使用自己已绑定的邀请码登录（已过期情况）
 print("\n[测试 10] 用户 C 绑定邀请码，然后邀请码过期，用户 C 再次登录")
 # 先创建一个马上过期的码
-fast_exp_code = "fast12"
+fast_exp_code = "fast_" + str(int(time.time()))
 request("POST", "/api/invite_code", {
     "inviteCode": fast_exp_code,
     "expireAt": int(time.time() * 1000) + 1000  # 1秒后过期

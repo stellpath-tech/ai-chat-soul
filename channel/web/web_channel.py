@@ -19,6 +19,7 @@ import mimetypes
 import threading
 import logging
 import channel.web.database as db
+from channel.web.metrics import MetricsHandler, metrics_processor, USER_AUTH_TOTAL
 
 # POST /message：仅本轮追加到 Agent system，约定可选情绪前缀（需 config 中 agent=true）
 _WEB_MESSAGE_EMOTION_APPEND = """## Web 回复可选情绪前缀
@@ -657,9 +658,11 @@ class WebChannel(ChatChannel):
             '/api/auth/register', 'AuthRegisterHandler',
             '/api/invite_code', 'InviteCodeHandler',
             '/api/user_behavior', 'UserBehaviorHandler',
+            '/metrics', 'MetricsHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
+        app.add_processor(metrics_processor)
         
         # 完全禁用web.py的HTTP日志输出
         web.httpserver.LogMiddleware.log = lambda self, status, environ: None
@@ -914,14 +917,19 @@ class AuthRegisterHandler:
             phone_number = data.get('phoneNumber')
             invite_code = data.get('inviteCode')
             if not phone_number or not invite_code:
+                USER_AUTH_TOTAL.labels(type="missing_params").inc()
                 return json.dumps({"success": False, "message": "Missing phoneNumber or inviteCode", "data": None}, ensure_ascii=False)
             
-            success, msg, token = db.register_or_login(phone_number, invite_code)
+            success, msg, token, action_type = db.register_or_login(phone_number, invite_code)
+            
+            USER_AUTH_TOTAL.labels(type=action_type).inc()
+            
             if not success:
                 return json.dumps({"success": False, "message": msg, "data": None}, ensure_ascii=False)
             
             return json.dumps({"success": True, "message": "Success", "data": {"token": token}}, ensure_ascii=False)
         except Exception as e:
+            USER_AUTH_TOTAL.labels(type="unknown_error").inc()
             logger.error(f"AuthRegisterHandler error: {e}")
             return json.dumps({"success": False, "message": "Server error", "data": None})
 

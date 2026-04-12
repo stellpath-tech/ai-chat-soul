@@ -68,27 +68,27 @@ def check_and_use_invite_code(phone_number, code):
         cursor.execute("SELECT * FROM invite_code WHERE invite_code = ?", (code,))
         row = cursor.fetchone()
         if not row:
-            return False, "无效的内测码"
+            return False, "无效的内测码", "invite_code_invalid"
             
         expire_at = datetime.strptime(row['expire_at'], "%Y-%m-%d %H:%M:%S")
         if datetime.now() > expire_at:
-            return False, "内测码已过期"
+            return False, "内测码已过期", "invite_code_expired"
             
         user_group = row['user_group']
         used_by_phone = row['used_by_phone']
         
         if used_by_phone and used_by_phone != phone_number:
-            return False, "内测码已被其他手机号绑定"
+            return False, "内测码已被其他手机号绑定", "invite_code_bound"
             
-        return True, user_group
+        return True, user_group, None
 
 def register_or_login(phone_number, invite_code):
     if not phone_number or not re.match(r'^\+\d{1,4}\d{6,14}$', phone_number):
-        return False, "手机号格式错误（需包含区号，如 +8613800000000）", None
+        return False, "手机号格式错误（需包含区号，如 +8613800000000）", None, "phone_format_error"
 
-    success, msg_or_group = check_and_use_invite_code(phone_number, invite_code)
+    success, msg_or_group, err_type = check_and_use_invite_code(phone_number, invite_code)
     if not success:
-        return False, msg_or_group, None
+        return False, msg_or_group, None, err_type
 
     user_group = msg_or_group
     token = generate_token()
@@ -105,18 +105,20 @@ def register_or_login(phone_number, invite_code):
                 UPDATE user SET invite_code = ?, user_group = ?, auth_token = ?, updated_at = ?
                 WHERE id = ?
             """, (invite_code, user_group, token, now_str, user['id']))
+            action = "login"
         else:
             cursor.execute("""
                 INSERT INTO user (phone_number, invite_code, user_group, auth_token, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (phone_number, invite_code, user_group, token, now_str, now_str))
+            action = "register"
             
         cursor.execute("""
             UPDATE invite_code SET used_by_phone = ?, updated_at = ? WHERE invite_code = ?
         """, (phone_number, now_str, invite_code))
         
         conn.commit()
-        return True, "Success", token
+        return True, "Success", token, action
 
 def get_user_by_token(token):
     if not token:
