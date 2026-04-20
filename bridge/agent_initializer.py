@@ -3,7 +3,6 @@ Agent Initializer - Handles agent initialization logic
 """
 
 import os
-import asyncio
 import datetime
 import time
 from typing import Optional, List
@@ -73,11 +72,8 @@ class AgentInitializer:
         else:
             logger.info(f"[AgentInitializer] Device workspace: {agent_workspace}")
         
-        # Setup memory system (uses agent_workspace for per-device isolation)
-        memory_manager, memory_tools = self._setup_memory_system(agent_workspace, session_id)
-        
         # Load tools (cwd = agent_workspace so file edits go to the right place)
-        tools = self._load_tools(agent_workspace, memory_manager, memory_tools, session_id)
+        tools = self._load_tools(agent_workspace, session_id)
         
         # Initialize scheduler if needed
         self._initialize_scheduler(tools, session_id)
@@ -91,14 +87,14 @@ class AgentInitializer:
 
         # Build system prompt：
         #   - agent.md + rule.md → system 消息（角色定义 + 行为规则，权重高）
-        #   - user.md → user 消息前缀（用户背景信息，由 run_stream() 首轮注入）
         #   - rule.md 每轮动态注入（由 agent.get_full_system_prompt() 实时读取）
         from agent.prompt.builder import build_companion_system_prompt
         agent_files = load_context_files(agent_workspace, ["AGENT.md"])
         user_files  = load_context_files(agent_workspace, ["USER.md"])
 
-        system_prompt = build_companion_system_prompt(agent_files)
-        user_prefix = build_companion_system_prompt(user_files) if user_files else ""
+        # AGENT.md + USER.md 合并进 system prompt
+        system_prompt = build_companion_system_prompt(agent_files + user_files)
+
         runtime_info = self._get_runtime_info(agent_workspace)
 
         if is_first:
@@ -125,14 +121,6 @@ class AgentInitializer:
         # rule.md 每轮动态注入：设置路径，由 get_full_system_prompt() 实时读取
         agent.rule_path = workspace_files.rule_path
 
-        # user.md → user 消息前缀：首轮对话时由 run_stream() 拼入 user 消息
-        if user_prefix:
-            agent.user_message_prefix = user_prefix
-
-        # Attach memory manager
-        if memory_manager:
-            agent.memory_manager = memory_manager
-        
         return agent
     
     def _load_env_file(self):
@@ -147,96 +135,13 @@ class AgentInitializer:
             except Exception as e:
                 logger.warning(f"[AgentInitializer] Failed to load .env file: {e}")
     
-    def _setup_memory_system(self, workspace_root: str, session_id: Optional[str] = None):
-        """
-        Setup memory system.
-
-        When session_id is provided (i.e. a device_id is present), the memory
-        workspace is isolated under ``{workspace_root}/devices/{session_id}`` so
-        that each device maintains its own long-term memory store.
-
-        Returns:
-            (memory_manager, memory_tools) tuple
-        """
-        memory_manager = None
-        memory_tools = []
-        
-        try:
-            from agent.memory import MemoryManager, MemoryConfig, create_embedding_provider
-            from agent.tools import MemorySearchTool, MemoryGetTool
-            from config import conf
-            
-            # workspace_root is already device-specific when session_id is set
-            # (resolved in initialize_agent before this method is called)
-
-            # Get OpenAI config
-            openai_api_key = conf().get("open_ai_api_key", "")
-            openai_api_base = conf().get("open_ai_api_base", "")
-            
-            # Initialize embedding provider
-            embedding_provider = None
-            if openai_api_key and openai_api_key not in ["", "YOUR API KEY", "YOUR_API_KEY"]:
-                try:
-                    embedding_provider = create_embedding_provider(
-                        provider="openai",
-                        model="text-embedding-3-small",
-                        api_key=openai_api_key,
-                        api_base=openai_api_base or "https://api.openai.com/v1"
-                    )
-                    if session_id is None:
-                        logger.info("[AgentInitializer] OpenAI embedding initialized")
-                except Exception as e:
-                    logger.warning(f"[AgentInitializer] OpenAI embedding failed: {e}")
-            
-            # Create memory manager using the workspace passed in
-            memory_config = MemoryConfig(workspace_root=workspace_root)
-            memory_manager = MemoryManager(memory_config, embedding_provider=embedding_provider)
-            
-            # Sync memory
-            self._sync_memory(memory_manager, session_id)
-            
-            # Create memory tools
-            memory_tools = [
-                MemorySearchTool(memory_manager),
-                MemoryGetTool(memory_manager)
-            ]
-            
-            if session_id is None:
-                logger.info("[AgentInitializer] Memory system initialized")
-        
-        except Exception as e:
-            logger.warning(f"[AgentInitializer] Memory system not available: {e}")
-        
-        return memory_manager, memory_tools
-    
-    def _sync_memory(self, memory_manager, session_id: Optional[str] = None):
-        """Sync memory database"""
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("Event loop is closed")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        try:
-            if loop.is_running():
-                asyncio.create_task(memory_manager.sync())
-            else:
-                loop.run_until_complete(memory_manager.sync())
-        except Exception as e:
-            logger.warning(f"[AgentInitializer] Memory sync failed: {e}")
-    
-    def _load_tools(self, workspace_root: str, memory_manager, memory_tools: List, session_id: Optional[str] = None):
+    def _load_tools(self, workspace_root: str, session_id: Optional[str] = None):
         """Load all tools"""
         tool_manager = ToolManager()
         tool_manager.load_tools()
-        
+
         tools = []
-        file_config = {
-            "cwd": workspace_root,
-            "memory_manager": memory_manager
-        } if memory_manager else {"cwd": workspace_root}
+        file_config = {"cwd": workspace_root}
         
         for tool_name in tool_manager.tool_classes.keys():
             try:
@@ -259,18 +164,10 @@ class AgentInitializer:
                     if tool_name in ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls']:
                         tool.config = file_config
                         tool.cwd = file_config.get("cwd", getattr(tool, 'cwd', None))
-                        if 'memory_manager' in file_config:
-                            tool.memory_manager = file_config['memory_manager']
                     tools.append(tool)
             except Exception as e:
                 logger.warning(f"[AgentInitializer] Failed to load tool {tool_name}: {e}")
-        
-        # Add memory tools
-        if memory_tools:
-            tools.extend(memory_tools)
-            if session_id is None:
-                logger.info(f"[AgentInitializer] Added {len(memory_tools)} memory tools")
-        
+
         if session_id is None:
             logger.info(f"[AgentInitializer] Loaded {len(tools)} tools: {[t.name for t in tools]}")
         

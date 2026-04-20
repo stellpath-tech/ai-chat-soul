@@ -206,43 +206,6 @@ class AgentStreamExecutor:
                 logger.info(f"[Agent] 第 {turn} 轮")
                 self._emit_event("turn_start", {"turn": turn})
 
-                # Check if memory extraction is needed (every 10 turns)
-                if self.agent.memory_manager and hasattr(self.agent, 'last_usage'):
-                    usage = self.agent.last_usage
-                    if usage and 'input_tokens' in usage:
-                        current_tokens = usage.get('input_tokens', 0)
-
-                        if self.agent.memory_manager.should_flush_memory(
-                                current_tokens=current_tokens
-                        ):
-                            self._emit_event("memory_flush_start", {
-                                "current_tokens": current_tokens,
-                                "turn_count": self.agent.memory_manager.flush_manager.turn_count
-                            })
-                            logger.info(
-                                f"[Agent] Triggering memory extraction: turns={self.agent.memory_manager.flush_manager.turn_count}"
-                            )
-                            # Fire-and-forget: run extraction in background without blocking the response
-                            import asyncio
-                            try:
-                                loop = asyncio.get_event_loop()
-                                if loop.is_running():
-                                    asyncio.ensure_future(
-                                        self.agent.memory_manager.execute_memory_flush(
-                                            messages=list(self.messages),
-                                            current_tokens=current_tokens,
-                                        )
-                                    )
-                                else:
-                                    loop.run_until_complete(
-                                        self.agent.memory_manager.execute_memory_flush(
-                                            messages=list(self.messages),
-                                            current_tokens=current_tokens,
-                                        )
-                                    )
-                            except Exception as _me:
-                                logger.warning(f"[Agent] Memory extraction scheduling failed: {_me}")
-
                 # Call LLM (enable retry_on_empty for better reliability)
                 assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=True)
                 final_response = assistant_msg
@@ -495,10 +458,6 @@ class AgentStreamExecutor:
             logger.info(f"[Agent] 🏁 完成 ({turn}轮)")
             self._emit_event("agent_end", {"final_response": final_response})
 
-            # 每轮对话结束后增加计数（用户消息+AI回复=1轮）
-            if self.agent.memory_manager:
-                self.agent.memory_manager.increment_turn()
-
         return final_response
 
     def _call_llm_stream(self, retry_on_empty=True, retry_count=0, max_retries=3,
@@ -535,6 +494,23 @@ class AgentStreamExecutor:
                     "description": tool.description,
                     "input_schema": tool.params  # Claude uses input_schema
                 })
+
+        # ── LLM 请求日志（DEBUG 级别，记录完整 system + messages）──────────────
+        try:
+            import os, datetime
+            _log_dir = os.path.join(os.path.dirname(__file__), "..", "..", "logs")
+            os.makedirs(_log_dir, exist_ok=True)
+            _log_path = os.path.join(_log_dir, "llm_requests.jsonl")
+            _entry = {
+                "ts": datetime.datetime.now().isoformat(),
+                "system": self.system_prompt,
+                "messages": messages,
+            }
+            with open(_log_path, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps(_entry, ensure_ascii=False) + "\n")
+        except Exception as _log_err:
+            logger.warning(f"[LLM log] 写入失败: {_log_err}")
+        # ─────────────────────────────────────────────────────────────────────
 
         # Create request
         request = LLMRequest(
@@ -1159,120 +1135,8 @@ class AgentStreamExecutor:
         return False
 
     def _trim_messages(self):
-        """
-        智能清理消息历史，保持对话完整性
-
-        使用完整轮次作为清理单位，确保：
-        1. 不会在对话中间截断
-        2. 工具调用链（tool_use + tool_result）保持完整
-        3. 每轮对话都是完整的（用户消息 + AI回复 + 工具调用）
-        """
-        if not self.messages or not self.agent:
-            return
-
-        # Step 0: Truncate large tool results in historical turns (30K -> 10K)
-        self._truncate_historical_tool_results()
-
-        # Step 1: 识别完整轮次
-        turns = self._identify_complete_turns()
-        
-        if not turns:
-            return
-        
-        # Step 2: 轮次限制 - 保留最近 N 轮
-        if len(turns) > self.max_context_turns:
-            removed_turns = len(turns) - self.max_context_turns
-            turns = turns[-self.max_context_turns:]  # 保留最近的轮次
-            
-            logger.info(
-                f"💾 上下文轮次超限: {len(turns) + removed_turns} > {self.max_context_turns}，"
-                f"移除最早的 {removed_turns} 轮完整对话"
-            )
-
-        # Step 3: Token 限制 - 保留完整轮次
-        # Get context window from agent (based on model)
-        context_window = self.agent._get_model_context_window()
-
-        # Use configured max_context_tokens if available
-        if hasattr(self.agent, 'max_context_tokens') and self.agent.max_context_tokens:
-            max_tokens = self.agent.max_context_tokens
-        else:
-            # Reserve 10% for response generation
-            reserve_tokens = int(context_window * 0.1)
-            max_tokens = context_window - reserve_tokens
-
-        # Estimate system prompt tokens
-        system_tokens = self.agent._estimate_message_tokens({"role": "system", "content": self.system_prompt})
-        available_tokens = max_tokens - system_tokens
-
-        # Calculate current tokens
-        current_tokens = sum(self._estimate_turn_tokens(turn) for turn in turns)
-        
-        # If under limit, reconstruct messages and return
-        if current_tokens + system_tokens <= max_tokens:
-            # Reconstruct message list from turns
-            new_messages = []
-            for turn in turns:
-                new_messages.extend(turn['messages'])
-            
-            old_count = len(self.messages)
-            self.messages = new_messages
-            
-            # Log if we removed messages due to turn limit
-            if old_count > len(self.messages):
-                logger.info(f"   重建消息列表: {old_count} -> {len(self.messages)} 条消息")
-            return
-
-        # Token limit exceeded - keep complete turns from newest
-        logger.info(
-            f"🔄 上下文tokens超限: ~{current_tokens + system_tokens} > {max_tokens}，"
-            f"将按完整轮次移除最早的对话"
-        )
-
-        # 从最新轮次开始，反向累加（保持完整轮次）
-        kept_turns = []
-        accumulated_tokens = 0
-        min_turns = 3  # 尽量保留至少 3 轮，但不强制（避免超出 token 限制）
-        
-        for i, turn in enumerate(reversed(turns)):
-            turn_tokens = self._estimate_turn_tokens(turn)
-            turns_from_end = i + 1
-            
-            # 检查是否超出限制
-            if accumulated_tokens + turn_tokens <= available_tokens:
-                kept_turns.insert(0, turn)
-                accumulated_tokens += turn_tokens
-            else:
-                # 超出限制
-                # 如果还没有保留足够的轮次，且这是最后的机会，尝试保留
-                if len(kept_turns) < min_turns and turns_from_end <= min_turns:
-                    # 检查是否严重超出（超出 20% 以上则放弃）
-                    overflow_ratio = (accumulated_tokens + turn_tokens - available_tokens) / available_tokens
-                    if overflow_ratio < 0.2:  # 允许最多超出 20%
-                        kept_turns.insert(0, turn)
-                        accumulated_tokens += turn_tokens
-                        logger.debug(f"   为保留最少轮次，允许超出 {overflow_ratio*100:.1f}%")
-                        continue
-                # 停止保留更早的轮次
-                break
-        
-        # 重建消息列表
-        new_messages = []
-        for turn in kept_turns:
-            new_messages.extend(turn['messages'])
-        
-        old_count = len(self.messages)
-        old_turn_count = len(turns)
-        self.messages = new_messages
-        new_count = len(self.messages)
-        new_turn_count = len(kept_turns)
-        
-        if old_count > new_count:
-            logger.info(
-                f"   移除了 {old_turn_count - new_turn_count} 轮对话 "
-                f"({old_count} -> {new_count} 条消息，"
-                f"~{current_tokens + system_tokens} -> ~{accumulated_tokens + system_tokens} tokens)"
-            )
+        """历史裁剪由外部记忆系统接管，此处不做处理。"""
+        pass
 
     def _prepare_messages(self) -> List[Dict[str, Any]]:
         """

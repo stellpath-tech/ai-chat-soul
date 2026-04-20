@@ -40,7 +40,6 @@ class PromptBuilder:
         tools: Optional[List[Any]] = None,
         context_files: Optional[List[ContextFile]] = None,
         skill_manager: Any = None,
-        memory_manager: Any = None,
         runtime_info: Optional[Dict[str, Any]] = None,
         is_first_conversation: bool = False,
         **kwargs
@@ -54,7 +53,6 @@ class PromptBuilder:
             tools: 工具列表
             context_files: 上下文文件列表（AGENT.md, USER.md, RULE.md等）
             skill_manager: 技能管理器
-            memory_manager: 记忆管理器
             runtime_info: 运行时信息
             is_first_conversation: 是否为首次对话
             **kwargs: 其他参数
@@ -70,7 +68,6 @@ class PromptBuilder:
             tools=tools,
             context_files=context_files,
             skill_manager=skill_manager,
-            memory_manager=memory_manager,
             runtime_info=runtime_info,
             is_first_conversation=is_first_conversation,
             **kwargs
@@ -85,7 +82,6 @@ def build_agent_system_prompt(
     tools: Optional[List[Any]] = None,
     context_files: Optional[List[ContextFile]] = None,
     skill_manager: Any = None,
-    memory_manager: Any = None,
     runtime_info: Optional[Dict[str, Any]] = None,
     is_first_conversation: bool = False,
     **kwargs
@@ -110,7 +106,6 @@ def build_agent_system_prompt(
         tools: 工具列表
         context_files: 上下文文件列表
         skill_manager: 技能管理器
-        memory_manager: 记忆管理器
         runtime_info: 运行时信息
         is_first_conversation: 是否为首次对话
         **kwargs: 其他参数
@@ -128,11 +123,7 @@ def build_agent_system_prompt(
     if skill_manager:
         sections.extend(_build_skills_section(skill_manager, tools, language))
     
-    # 3. 记忆系统（独立的记忆能力）
-    if memory_manager:
-        sections.extend(_build_memory_section(memory_manager, tools, language))
-    
-    # 4. 工作空间（工作环境说明）
+    # 3. 工作空间（工作环境说明）
     sections.extend(_build_workspace_section(workspace_dir, language, is_first_conversation))
     
     # 5. 用户身份（如果有）
@@ -197,8 +188,6 @@ def _build_tooling_section(tools: List[Any], language: str) -> List[str]:
         "web_search": "网络搜索",
         "web_fetch": "获取URL内容",
         "browser": "控制浏览器",
-        "memory_search": "搜索记忆",
-        "memory_get": "读取记忆内容",
         "env_config": "管理API密钥和技能配置",
         "scheduler": "管理定时任务和提醒",
         "send": "发送文件给用户",
@@ -209,7 +198,6 @@ def _build_tooling_section(tools: List[Any], language: str) -> List[str]:
         "read", "write", "edit", "ls", "grep", "find",
         "bash", "terminal",
         "web_search", "web_fetch", "browser",
-        "memory_search", "memory_get",
         "env_config", "scheduler", "send",
     ]
 
@@ -287,46 +275,6 @@ def _build_skills_section(skill_manager: Any, tools: Optional[List[Any]], langua
         logger.warning(f"Failed to build skills prompt: {e}")
         import traceback
         logger.debug(f"Skills prompt error traceback: {traceback.format_exc()}")
-    
-    return lines
-
-
-def _build_memory_section(memory_manager: Any, tools: Optional[List[Any]], language: str) -> List[str]:
-    """构建记忆系统section"""
-    if not memory_manager:
-        return []
-    
-    # 检查是否有memory工具
-    has_memory_tools = False
-    if tools:
-        tool_names = [tool.name if hasattr(tool, 'name') else str(tool) for tool in tools]
-        has_memory_tools = any(name in ['memory_search', 'memory_get'] for name in tool_names)
-    
-    if not has_memory_tools:
-        return []
-    
-    lines = [
-        "## 记忆系统",
-        "",
-        "在回答关于以前的工作、决定、日期、人物、偏好或待办事项的任何问题之前：",
-        "",
-        "1. 不确定记忆文件位置 → 先用 `memory_search` 通过关键词和语义检索相关内容",
-        "2. 已知文件位置 → 直接用 `memory_get` 读取相应的行 (例如：MEMORY.md, memory/YYYY-MM-DD.md)",
-        "3. search 无结果 → 尝试用 `memory_get` 读取MEMORY.md及最近两天记忆文件",
-        "",
-        "**记忆文件结构**:",
-        "- `MEMORY.md`: 长期记忆（核心信息、偏好、决策等）",
-        "- `memory/YYYY-MM-DD.md`: 每日记忆，记录当天的事件和对话信息",
-        "",
-        "**写入记忆**:",
-        "- 追加内容 → `edit` 工具，oldText 留空",
-        "- 修改内容 → `edit` 工具，oldText 填写要替换的文本",
-        "- 新建文件 → `write` 工具",
-        "- **禁止写入敏感信息**：API密钥、令牌等敏感信息严禁写入记忆文件",
-        "",
-        "**使用原则**: 自然使用记忆，就像你本来就知道；不用刻意提起，除非用户问起。",
-        "",
-    ]
     
     return lines
 

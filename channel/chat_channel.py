@@ -5,8 +5,6 @@ import threading
 import time
 from asyncio import CancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
-
 from bridge.context import *
 from bridge.reply import *
 from bridge.bridge import Bridge
@@ -347,29 +345,7 @@ class ChatChannel(Channel):
                 logger.warning(f"[chat_channel] reset workspace prompts failed for {workspace_dir}: {e}")
 
     def _clear_long_term_memory(self):
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
-        memory_file = os.path.join(workspace_root, "MEMORY.md")
-        memory_dir = os.path.join(workspace_root, "memory")
-
-        try:
-            os.makedirs(workspace_root, exist_ok=True)
-            with open(memory_file, "w", encoding="utf-8") as f:
-                f.write("")
-        except Exception as e:
-            logger.warning(f"[chat_channel] clear MEMORY.md failed: {e}")
-
-        try:
-            if os.path.isdir(memory_dir):
-                shutil.rmtree(memory_dir, ignore_errors=True)
-            os.makedirs(memory_dir, exist_ok=True)
-        except Exception as e:
-            logger.warning(f"[chat_channel] clear memory directory failed: {e}")
-
-        try:
-            from agent.memory.summarizer import create_memory_files_if_needed
-            create_memory_files_if_needed(Path(workspace_root))
-        except Exception as e:
-            logger.warning(f"[chat_channel] re-create memory files failed: {e}")
+        pass
 
     def _decorate_reply(self, context: Context, reply: Reply) -> Reply:
         if reply and reply.type:

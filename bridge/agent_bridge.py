@@ -6,6 +6,7 @@ import os
 from typing import Optional, List
 
 from agent.protocol import Agent, LLMModel, LLMRequest
+from agent.session.store import SessionStore
 from bridge.agent_event_handler import AgentEventHandler
 from bridge.agent_initializer import AgentInitializer
 from bridge.bridge import Bridge
@@ -203,7 +204,13 @@ class AgentBridge:
         self.default_agent = None  # For backward compatibility (no session_id)
         self.agent: Optional[Agent] = None
         self.scheduler_initialized = False
-        
+
+        # Session persistence
+        from config import conf
+        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        max_turns = conf().get("session_max_turns", 80)
+        self.session_store = SessionStore(workspace_root, max_turns=max_turns)
+
         # Create helper instances
         self.initializer = AgentInitializer(bridge, self)
     def create_agent(self, system_prompt: str, tools: List = None, **kwargs) -> Agent:
@@ -247,7 +254,6 @@ class AgentBridge:
             output_mode=kwargs.get("output_mode", "logger"),
             workspace_dir=kwargs.get("workspace_dir"),  # Pass workspace for skills loading
             enable_skills=kwargs.get("enable_skills", True),  # Enable skills by default
-            memory_manager=kwargs.get("memory_manager"),  # Pass memory manager
             max_context_tokens=kwargs.get("max_context_tokens"),
             context_reserve_tokens=kwargs.get("context_reserve_tokens"),
             runtime_info=kwargs.get("runtime_info")  # Pass runtime_info for dynamic time updates
@@ -287,8 +293,12 @@ class AgentBridge:
         self.default_agent = agent
     
     def _init_agent_for_session(self, session_id: str):
-        """Initialize agent for a specific session"""
+        """Initialize agent for a specific session, restoring persisted history."""
         agent = self.initializer.initialize_agent(session_id=session_id)
+        saved = self.session_store.load(session_id)
+        if saved:
+            agent.messages = saved
+            logger.info(f"[AgentBridge] Restored {len(saved)} messages for session {session_id}")
         self.agents[session_id] = agent
     
     def agent_reply(self, query: str, context: Context = None, 
@@ -375,9 +385,13 @@ class AgentBridge:
                 # Restore original tools
                 if (context and context.get("is_scheduled_task")) or is_image_feedback:
                     agent.tools = original_tools
-                
+
                 # Log execution summary
                 event_handler.log_summary()
+
+            # Persist session history
+            if session_id:
+                self.session_store.save(session_id, agent.messages)
             
             # Check if there are files to send (from read tool)
             if hasattr(agent, 'stream_executor') and hasattr(agent.stream_executor, 'files_to_send'):
@@ -518,17 +532,20 @@ class AgentBridge:
     def clear_session(self, session_id: str):
         """
         Clear a specific session's agent and conversation history
-        
+
         Args:
             session_id: Session identifier to clear
         """
         if session_id in self.agents:
             logger.info(f"[AgentBridge] Clearing session: {session_id}")
             del self.agents[session_id]
+        self.session_store.delete(session_id)
     
     def clear_all_sessions(self):
         """Clear all agent sessions"""
         logger.info(f"[AgentBridge] Clearing all sessions ({len(self.agents)} total)")
+        for session_id in list(self.agents.keys()):
+            self.session_store.delete(session_id)
         self.agents.clear()
         self.default_agent = None
     

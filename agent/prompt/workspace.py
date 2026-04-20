@@ -62,15 +62,12 @@ def ensure_workspace(workspace_dir: str, create_templates: bool = True) -> Works
     skills_dir = os.path.join(workspace_dir, "skills")
     os.makedirs(skills_dir, exist_ok=True)
     
-    # 如果需要，创建/同步模板文件
-    # AGENT.md / RULE.md：每次启动都从 templates/ 同步，保证改了模板立即生效
-    # USER.md：只在不存在时创建（用户个人信息不应被模板覆盖）
-    # MEMORY.md：只在不存在时创建（长期记忆不应被覆盖）
+    # AGENT.md / USER.md / RULE.md / MEMORY.md：每次启动都从 templates/ 同步覆盖
     if create_templates:
         _sync_template(agent_path, _get_agent_template())
         _sync_template(user_path, _get_user_template())
         _sync_template(rule_path, _get_rule_template())
-        _create_template_if_missing(memory_path, _get_memory_template())
+        _sync_template(memory_path, _get_memory_template())
         
         logger.debug(f"[Workspace] Initialized workspace at: {workspace_dir}")
     

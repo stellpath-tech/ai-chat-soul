@@ -70,11 +70,6 @@ class ToolManager:
                                     and cls != BaseTool
                             ):
                                 try:
-                                    # Skip memory tools (they need special initialization with memory_manager)
-                                    if class_name in ["MemorySearchTool", "MemoryGetTool"]:
-                                        logger.debug(f"Skipped tool {class_name} (requires memory_manager)")
-                                        continue
-                                    
                                     # Create a temporary instance to get the name
                                     temp_instance = cls()
                                     tool_name = temp_instance.name
@@ -141,11 +136,6 @@ class ToolManager:
                                 and cls != BaseTool
                         ):
                             try:
-                                # Skip memory tools (they need special initialization with memory_manager)
-                                if attr_name in ["MemorySearchTool", "MemoryGetTool"]:
-                                    logger.debug(f"Skipped tool {attr_name} (requires memory_manager)")
-                                    continue
-                                
                                 # Create a temporary instance to get the name
                                 temp_instance = cls()
                                 tool_name = temp_instance.name

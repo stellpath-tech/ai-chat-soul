@@ -646,8 +646,6 @@ class WebChannel(ChatChannel):
             '/chat', 'ChatHandler',
             '/config', 'ConfigHandler',
             '/api/skills', 'SkillsHandler',
-            '/api/memory', 'MemoryHandler',
-            '/api/memory/content', 'MemoryContentHandler',
             '/api/scheduler', 'SchedulerHandler',
             '/api/logs', 'LogsHandler',
             '/api/device/register', 'DeviceRegisterHandler',
@@ -776,40 +774,6 @@ class SkillsHandler:
             return json.dumps({"status": "success", "skills": skills}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Skills API error: {e}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-class MemoryHandler:
-    def GET(self):
-        web.header('Content-Type', 'application/json; charset=utf-8')
-        try:
-            from agent.memory.service import MemoryService
-            params = web.input(page='1', page_size='20')
-            workspace_root = _get_workspace_root()
-            service = MemoryService(workspace_root)
-            result = service.list_files(page=int(params.page), page_size=int(params.page_size))
-            return json.dumps({"status": "success", **result}, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"[WebChannel] Memory API error: {e}")
-            return json.dumps({"status": "error", "message": str(e)})
-
-
-class MemoryContentHandler:
-    def GET(self):
-        web.header('Content-Type', 'application/json; charset=utf-8')
-        try:
-            from agent.memory.service import MemoryService
-            params = web.input(filename='')
-            if not params.filename:
-                return json.dumps({"status": "error", "message": "filename required"})
-            workspace_root = _get_workspace_root()
-            service = MemoryService(workspace_root)
-            result = service.get_content(params.filename)
-            return json.dumps({"status": "success", **result}, ensure_ascii=False)
-        except FileNotFoundError:
-            return json.dumps({"status": "error", "message": "file not found"})
-        except Exception as e:
-            logger.error(f"[WebChannel] Memory content API error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
 
 

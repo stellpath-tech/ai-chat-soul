@@ -13,8 +13,8 @@ from agent.tools.base_tool import BaseTool, ToolStage
 
 class Agent:
     def __init__(self, system_prompt: str, description: str = "AI Agent", model: LLMModel = None,
-                 tools=None, output_mode="print", max_steps=100, max_context_tokens=None, 
-                 context_reserve_tokens=None, memory_manager=None, name: str = None,
+                 tools=None, output_mode="print", max_steps=100, max_context_tokens=None,
+                 context_reserve_tokens=None, name: str = None,
                  workspace_dir: str = None, skill_manager=None, enable_skills: bool = True,
                  runtime_info: dict = None):
         """
@@ -24,12 +24,11 @@ class Agent:
         :param description: A description of the agent.
         :param model: An instance of LLMModel to be used by the agent.
         :param tools: Optional list of tools for the agent to use.
-        :param output_mode: Control how execution progress is displayed: 
+        :param output_mode: Control how execution progress is displayed:
                            "print" for console output or "logger" for using logger
         :param max_steps: Maximum number of steps the agent can take (default: 100)
         :param max_context_tokens: Maximum tokens to keep in context (default: None, auto-calculated based on model)
         :param context_reserve_tokens: Reserve tokens for new requests (default: None, auto-calculated)
-        :param memory_manager: Optional MemoryManager instance for memory operations
         :param name: [Deprecated] The name of the agent (no longer used in single-agent system)
         :param workspace_dir: Optional workspace directory for workspace-specific skills
         :param skill_manager: Optional SkillManager instance (will be created if None and enable_skills=True)
@@ -49,7 +48,6 @@ class Agent:
         self.last_usage = None  # Store last API response usage info
         self.messages = []  # Unified message history for stream mode
         self.messages_lock = threading.Lock()  # Lock for thread-safe message operations
-        self.memory_manager = memory_manager  # Memory manager for auto memory flush
         self.workspace_dir = workspace_dir  # Workspace directory
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
@@ -112,12 +110,33 @@ class Agent:
         """
         prompt = self.system_prompt
 
-        # Per-turn: reload and append RULE.md
+        # Per-turn: reload and append RULE.md（含颜文字随机注入）
         if self.rule_path and os.path.exists(self.rule_path):
             try:
                 with open(self.rule_path, 'r', encoding='utf-8') as f:
                     rule_content = f.read().strip()
                 if rule_content:
+                    # 随机分配本轮颜文字，替换 {kaomoji_today} 占位符
+                    if "{kaomoji_today}" in rule_content:
+                        try:
+                            from agent.utils.kaomoji import pick_kaomoji
+                            _km = pick_kaomoji()
+                            self._last_kaomoji = _km   # 供 run_stream 注入用户消息
+                            rule_content = rule_content.replace("{kaomoji_today}", _km)
+                        except Exception as _ke:
+                            logger.warning(f"[Agent] kaomoji injection failed: {_ke}")
+                            self._last_kaomoji = ""
+                    else:
+                        self._last_kaomoji = ""
+                    # 随机分配本轮风格模式，替换 {style_today} 占位符
+                    if "{style_today}" in rule_content:
+                        try:
+                            from agent.utils.style import pick_style
+                            _style = pick_style()
+                            rule_content = rule_content.replace("{style_today}", _style)
+                        except Exception as _se:
+                            logger.warning(f"[Agent] style injection failed: {_se}")
+                            rule_content = rule_content.replace("{style_today}", "")
                     prompt = (prompt + "\n\n" + rule_content) if prompt else rule_content
             except Exception as e:
                 logger.warning(f"[Agent] Failed to reload RULE.md: {e}")

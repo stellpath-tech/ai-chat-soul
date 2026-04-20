@@ -2,7 +2,24 @@
   "permissions": {
     "allow": [
       "Bash(find:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Read(//c/Users/he_re/Documents/tbsi-3-1/**)",
+      "Bash(python -c ':*)",
+      "Bash(python:*)",
+      "Bash(xargs grep:*)",
+      "Bash(xxd)",
+      "Bash(ls:*)",
+      "Bash(export SILICONFLOW_API_KEY=sk-xqlzxsudxvbwredvwpklwssmznaubocjijdtkkacsdhjvmpp)",
+      "Bash(sed -n '100,150p' \"C:/Users/he_re/Documents/tbsi-3-1/agent_eval/companion_eval/template/kaomojis.txt\")",
+      "Bash(sed -n '200,230p' \"C:/Users/he_re/Documents/tbsi-3-1/agent_eval/companion_eval/template/kaomojis.txt\")",
+      "Bash(python3 -c \"import sys,csv; r=csv.DictReader\\(sys.stdin\\); rows=list\\(r\\); print\\(r.fieldnames\\)\")",
+      "Bash(python3 \"/c/Users/he_re/Documents/tbsi-3-1/agent_eval/results/experiments/eval_20260415_165151/conversations.csv\")",
+      "Bash(python3 -c ':*)",
+      "Bash(iconv -f gbk -t utf-8)",
+      "Bash(python3 *)",
+      "Bash(rm -rf /c/Users/he_re/Documents/tbsi-3-1/servers-chat/ai-chat-soul/agent/memory)",
+      "Bash(rm -rf /c/Users/he_re/Documents/tbsi-3-1/servers-chat/ai-chat-soul/agent/tools/memory)",
+      "Bash(grep -rn \"系统指令\\\\|颜文字库\\\\|emotion\\\\|kaomoji\\\\|emoji_inject\\\\|HAPPY\\\\|SHY\\\\|\\\\$\\\\$\" /c/Users/he_re/Documents/tbsi-3-1/servers-chat/ai-chat-soul/ --include=\"*.py\")"
     ]
   }
 }

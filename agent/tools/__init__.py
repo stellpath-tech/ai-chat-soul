@@ -10,10 +10,6 @@ from agent.tools.bash.bash import Bash
 from agent.tools.ls.ls import Ls
 from agent.tools.send.send import Send
 
-# Import memory tools
-from agent.tools.memory.memory_search import MemorySearchTool
-from agent.tools.memory.memory_get import MemoryGetTool
-
 # Import tools with optional dependencies
 def _import_optional_tools():
     """Import tools that have optional dependencies"""
@@ -97,8 +93,6 @@ __all__ = [
     'Bash',
     'Ls',
     'Send',
-    'MemorySearchTool',
-    'MemoryGetTool',
     'EnvConfig',
     'SchedulerTool',
     'WebSearch',
