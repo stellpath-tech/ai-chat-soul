@@ -18,19 +18,42 @@ from common.utils import expand_path
 from models.openai_compatible_bot import OpenAICompatibleBot
 
 
-def _build_image_content(text: str, image_path: str) -> list:
-    """Build an OpenAI-compatible multimodal content list with text + image_url block."""
+def _describe_image_with_doubao(image_path: str) -> str:
+    """Call Doubao VL to describe the image in ≤30 chars. Returns the raw description string."""
     import base64
+    from config import conf
     ext = os.path.splitext(image_path)[1].lower()
     mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/jpeg")
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
-    content = []
-    if text and text.strip():
-        content.append({"type": "text", "text": text.strip()})
-    content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-    return content
+
+    vl_model = conf().get("doubao_vl_model", "doubao-vision-pro-32k-250615")
+    api_key = conf().get("ark_api_key", "")
+    base_url = conf().get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+
+    import requests
+    payload = {
+        "model": vl_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                    {"type": "text", "text": "请用一句话描述这张图片的主要内容和情感氛围，15字以内"},
+                ],
+            }
+        ],
+        "max_tokens": 32,
+    }
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 def add_openai_compatible_support(bot_instance):
@@ -365,14 +388,26 @@ class AgentBridge:
             
             append_system = context.get("append_system_prompt") if context else None
 
-            # Build user_message: multimodal content list when an image is present
+            # Image: describe via Doubao VL, then inject description wrapped in [ ]
             image_path = context.get("image_path") if context else None
             if image_path and os.path.exists(image_path):
-                user_message = _build_image_content(query, image_path)
-                logger.info(f"[AgentBridge] Injecting image into agent message: {image_path}")
+                try:
+                    desc = _describe_image_with_doubao(image_path)
+                    logger.info(f"[AgentBridge] Doubao image description: {desc}")
+                    wrapped = f"[{desc}]"
+                    user_message = f"{query}\n{wrapped}".strip() if query and query.strip() else wrapped
+                except Exception as e:
+                    logger.warning(f"[AgentBridge] Doubao image description failed: {e}, falling back to text-only")
+                    user_message = query or ""
             else:
                 user_message = query
 
+            # Input redline filter
+            from agent.utils.redline import filter_input
+            if isinstance(user_message, str):
+                user_message, _in_trigger = filter_input(user_message)
+                if _in_trigger:
+                    logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
@@ -388,6 +423,25 @@ class AgentBridge:
 
                 # Log execution summary
                 event_handler.log_summary()
+
+            # Output redline filter — retry once if triggered
+            from agent.utils.redline import filter_output
+            _, _out_trigger = filter_output(response)
+            if _out_trigger:
+                logger.info(f"[Redline] output triggered: type={_out_trigger.type} matched={_out_trigger.matched!r}, retrying")
+                _RETRY_MSG = "[用户发来了满仓完全看不懂的内容]"
+                try:
+                    response = agent.run_stream(
+                        user_message=_RETRY_MSG,
+                        on_event=event_handler.handle_event,
+                        clear_history=False,
+                        append_system=append_system,
+                    )
+                    _, _retry_trigger = filter_output(response)
+                    if _retry_trigger:
+                        logger.warning(f"[Redline] retry also triggered: type={_retry_trigger.type}")
+                except Exception as _re:
+                    logger.warning(f"[Redline] retry failed: {_re}")
 
             # Persist session history
             if session_id:
