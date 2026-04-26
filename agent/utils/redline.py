@@ -44,6 +44,7 @@ _IDENTITY_KW_PATS = [
     r"大模型",
     r"哪个模型",
     r"模型身份",
+    r"AI",
     r"AI公司",
     r"\bLLM\b",
     r"\bAPI\b",
