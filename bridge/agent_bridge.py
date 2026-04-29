@@ -18,6 +18,40 @@ from common.utils import expand_path
 from models.openai_compatible_bot import OpenAICompatibleBot
 
 
+def _image_to_data_url(image_path: str) -> str:
+    import base64
+
+    ext = os.path.splitext(image_path)[1].lower()
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(ext, "image/jpeg")
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
+
+
+def _build_direct_image_message(query: str, image_path: str) -> List[dict]:
+    from config import conf
+
+    detail = conf().get("image_agent_openai_detail", "auto")
+    image_block = {
+        "type": "image_url",
+        "image_url": {"url": _image_to_data_url(image_path)},
+    }
+    if detail in {"auto", "low", "high"}:
+        image_block["image_url"]["detail"] = detail
+
+    content = []
+    if query and query.strip():
+        content.append({"type": "text", "text": query.strip()})
+    content.append(image_block)
+    return content
+
+
 def _describe_image_with_doubao(image_path: str) -> str:
     """Call Doubao VL to describe the image in ≤30 chars. Returns the raw description string."""
     import base64
@@ -28,7 +62,7 @@ def _describe_image_with_doubao(image_path: str) -> str:
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
 
-    vl_model = conf().get("doubao_vl_model", "doubao-vision-pro-32k-250615")
+    vl_model = conf().get("doubao_vl_model", "doubao-seed-2-0-mini-260215")
     api_key = conf().get("ark_api_key", "")
     base_url = conf().get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 
@@ -236,6 +270,25 @@ class AgentBridge:
 
         # Create helper instances
         self.initializer = AgentInitializer(bridge, self)
+
+    @staticmethod
+    def _sanitize_image_blocks_for_history(messages: List[dict]) -> None:
+        """Replace inline image blocks after a run so persisted history stays small."""
+        for msg in messages or []:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            sanitized = []
+            changed = False
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    sanitized.append({"type": "text", "text": "[image omitted after this turn]"})
+                    changed = True
+                else:
+                    sanitized.append(block)
+            if changed:
+                msg["content"] = sanitized
+
     def create_agent(self, system_prompt: str, tools: List = None, **kwargs) -> Agent:
         """
         Create the super agent with COW integration
@@ -388,17 +441,34 @@ class AgentBridge:
             
             append_system = context.get("append_system_prompt") if context else None
 
-            # Image: describe via Doubao VL, then inject description wrapped in [ ]
+            # Image feedback supports two multimodal paths:
+            # - doubao_summary: describe via Doubao VL, then pass text to the main model.
+            # - openai_direct: pass image_url blocks directly to the main model.
             image_path = context.get("image_path") if context else None
             if image_path and os.path.exists(image_path):
-                try:
-                    desc = _describe_image_with_doubao(image_path)
-                    logger.info(f"[AgentBridge] Doubao image description: {desc}")
-                    wrapped = f"[{desc}]"
-                    user_message = f"{query}\n{wrapped}".strip() if query and query.strip() else wrapped
-                except Exception as e:
-                    logger.warning(f"[AgentBridge] Doubao image description failed: {e}, falling back to text-only")
-                    user_message = query or ""
+                from config import conf
+
+                image_mode = str(conf().get("image_agent_multimodal_mode", "doubao_summary") or "doubao_summary").lower()
+                if image_mode in {"openai", "openai_direct", "direct", "gpt4o", "gpt-4o"}:
+                    user_message = _build_direct_image_message(query, image_path)
+                    logger.info("[AgentBridge] Image feedback using direct OpenAI-compatible image input")
+                elif image_mode in {"both", "openai_with_summary", "direct_with_summary"}:
+                    user_message = _build_direct_image_message(query, image_path)
+                    try:
+                        desc = _describe_image_with_doubao(image_path)
+                        logger.info(f"[AgentBridge] Doubao image description: {desc}")
+                        user_message.insert(0, {"type": "text", "text": f"[image summary: {desc}]"})
+                    except Exception as e:
+                        logger.warning(f"[AgentBridge] Doubao image description failed: {e}, using direct image input only")
+                else:
+                    try:
+                        desc = _describe_image_with_doubao(image_path)
+                        logger.info(f"[AgentBridge] Doubao image description: {desc}")
+                        wrapped = f"[{desc}]"
+                        user_message = f"{query}\n{wrapped}".strip() if query and query.strip() else wrapped
+                    except Exception as e:
+                        logger.warning(f"[AgentBridge] Doubao image description failed: {e}, falling back to text-only")
+                        user_message = query or ""
             else:
                 user_message = query
 
@@ -408,6 +478,12 @@ class AgentBridge:
                 user_message, _in_trigger = filter_input(user_message)
                 if _in_trigger:
                     logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
+            elif isinstance(user_message, list):
+                for block in user_message:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        block["text"], _in_trigger = filter_input(block.get("text", ""))
+                        if _in_trigger:
+                            logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
@@ -442,6 +518,8 @@ class AgentBridge:
                         logger.warning(f"[Redline] retry also triggered: type={_retry_trigger.type}")
                 except Exception as _re:
                     logger.warning(f"[Redline] retry failed: {_re}")
+
+            self._sanitize_image_blocks_for_history(agent.messages)
 
             # Persist session history
             if session_id:

@@ -95,6 +95,8 @@ available_setting = {
     "image_recognition_prompt": "请描述这张图片的主要内容。",
     "image_use_agent": True,
     "image_agent_prompt": "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。",
+    "image_agent_multimodal_mode": "doubao_summary",
+    "image_agent_openai_detail": "auto",
     "voice_reply_voice": False,
     "always_reply_voice": False,
     "voice_to_text": "openai",
@@ -171,6 +173,7 @@ available_setting = {
 
     "ark_api_key": "",
     "ark_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "doubao_vl_model": "doubao-seed-2-0-mini-260215",
 
     "modelscope_api_key": "",
     "modelscope_base_url": "https://api-inference.modelscope.cn/v1/chat/completions",
