@@ -26,6 +26,8 @@
   "image_agent_prompt": "请结合当前人设与会话上下文，对这张图片给出有温度的反馈。",
   "image_agent_multimodal_mode": "doubao_summary",
   "image_agent_openai_detail": "auto",
+  "image_agent_memory_prompt": "请为这张图片生成一段可用于后续对话追问的精准视觉记忆。用中文，120-220字，尽量客观具体。覆盖：主体和场景、空间布局、装潢/材质/色彩/灯光、人物数量和动作、可见文字或招牌、桌面物品、氛围，以及不确定但可能相关的细节。不要寒暄，不要编造看不清的内容。",
+  "image_agent_memory_max_tokens": 280,
   "doubao_vl_model": "doubao-seed-2-0-mini-260215",
   "use_linkai": false,
   "linkai_api_key": "",

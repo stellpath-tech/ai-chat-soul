@@ -90,6 +90,47 @@ def _describe_image_with_doubao(image_path: str) -> str:
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
+def _describe_image_with_doubao(image_path: str) -> str:
+    """Call Doubao VL to create a compact visual memory for follow-up turns."""
+    from config import conf
+
+    vl_model = conf().get("doubao_vl_model", "doubao-seed-2-0-mini-260215")
+    api_key = conf().get("ark_api_key", "")
+    base_url = conf().get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+    prompt = conf().get(
+        "image_agent_memory_prompt",
+        (
+            "请为这张图片生成一段可用于后续对话追问的精准视觉记忆。"
+            "用中文，120-220字，尽量客观具体。覆盖：主体和场景、空间布局、"
+            "装潢/材质/色彩/灯光、人物数量和动作、可见文字或招牌、桌面物品、"
+            "氛围，以及不确定但可能相关的细节。不要寒暄，不要编造看不清的内容。"
+        ),
+    )
+
+    import requests
+    payload = {
+        "model": vl_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": _image_to_data_url(image_path)}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "max_tokens": conf().get("image_agent_memory_max_tokens", 280),
+    }
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
 def add_openai_compatible_support(bot_instance):
     """
     Dynamically add OpenAI-compatible tool calling support to a bot instance.
@@ -451,23 +492,29 @@ class AgentBridge:
                 image_mode = str(conf().get("image_agent_multimodal_mode", "doubao_summary") or "doubao_summary").lower()
                 if image_mode in {"openai", "openai_direct", "direct", "gpt4o", "gpt-4o"}:
                     user_message = _build_direct_image_message(query, image_path)
+                    try:
+                        desc = _describe_image_with_doubao(image_path)
+                        logger.info(f"[AgentBridge] Doubao image memory: {desc}")
+                        user_message.insert(0, {"type": "text", "text": f"[image memory: {desc}]"})
+                    except Exception as e:
+                        logger.warning(f"[AgentBridge] Doubao image memory failed: {e}, using direct image input only")
                     logger.info("[AgentBridge] Image feedback using direct OpenAI-compatible image input")
                 elif image_mode in {"both", "openai_with_summary", "direct_with_summary"}:
                     user_message = _build_direct_image_message(query, image_path)
                     try:
                         desc = _describe_image_with_doubao(image_path)
-                        logger.info(f"[AgentBridge] Doubao image description: {desc}")
-                        user_message.insert(0, {"type": "text", "text": f"[image summary: {desc}]"})
+                        logger.info(f"[AgentBridge] Doubao image memory: {desc}")
+                        user_message.insert(0, {"type": "text", "text": f"[image memory: {desc}]"})
                     except Exception as e:
-                        logger.warning(f"[AgentBridge] Doubao image description failed: {e}, using direct image input only")
+                        logger.warning(f"[AgentBridge] Doubao image memory failed: {e}, using direct image input only")
                 else:
                     try:
                         desc = _describe_image_with_doubao(image_path)
-                        logger.info(f"[AgentBridge] Doubao image description: {desc}")
+                        logger.info(f"[AgentBridge] Doubao image memory: {desc}")
                         wrapped = f"[{desc}]"
                         user_message = f"{query}\n{wrapped}".strip() if query and query.strip() else wrapped
                     except Exception as e:
-                        logger.warning(f"[AgentBridge] Doubao image description failed: {e}, falling back to text-only")
+                        logger.warning(f"[AgentBridge] Doubao image memory failed: {e}, falling back to text-only")
                         user_message = query or ""
             else:
                 user_message = query
