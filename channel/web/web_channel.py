@@ -656,6 +656,7 @@ class WebChannel(ChatChannel):
             '/api/auth/register', 'AuthRegisterHandler',
             '/api/invite_code', 'InviteCodeHandler',
             '/api/user_behavior', 'UserBehaviorHandler',
+            '/api/weather', 'WeatherHandler',
             '/metrics', 'MetricsHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
@@ -981,3 +982,158 @@ class AssetsHandler:
         except Exception as e:
             logger.error(f"Error serving static file: {e}", exc_info=True)  # 添加更详细的错误信息
             raise web.notfound()
+
+
+from common.expired_dict import ExpiredDict
+
+_weather_cache = ExpiredDict(600)
+
+class WeatherHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            params = web.input(lat=None, lon=None)
+            lat = params.lat
+            lon = params.lon
+
+            if not lat or not lon:
+                return json.dumps({"success": False, "message": "Missing lat or lon", "data": None}, ensure_ascii=False)
+
+            try:
+                grid_lat = round(float(lat), 2)
+                grid_lon = round(float(lon), 2)
+                cache_key = f"{grid_lat},{grid_lon}"
+            except ValueError:
+                return json.dumps({"success": False, "message": "Invalid lat or lon", "data": None}, ensure_ascii=False)
+
+            cached_data = _weather_cache.get(cache_key)
+            if cached_data:
+                return json.dumps({"success": True, "message": "Success (cached)", "data": cached_data}, ensure_ascii=False)
+
+            import requests
+            from datetime import datetime
+
+            api_key = conf().get("qweather_api_key", "1c50ee817a4d4bb2b338043de8c6410d")
+            location = f"{grid_lon},{grid_lat}"
+            headers = {"X-QW-Api-Key": api_key}
+
+            # Fetch now weather
+            now_url = f"https://mt2x88w6bx.re.qweatherapi.com/v7/weather/now?location={location}"
+            now_res_obj = requests.get(now_url, headers=headers, timeout=10)
+            now_res = now_res_obj.json()
+
+            # Fetch 3d weather
+            daily_url = f"https://mt2x88w6bx.re.qweatherapi.com/v7/weather/3d?location={location}"
+            daily_res_obj = requests.get(daily_url, headers=headers, timeout=10)
+            daily_res = daily_res_obj.json()
+
+            if now_res.get("code") != "200" or daily_res.get("code") != "200":
+                return json.dumps({"success": False, "message": f"Weather API returned error: {now_res.get('code')}, {daily_res.get('code')}", "data": None}, ensure_ascii=False)
+
+            now_data = now_res.get("now", {})
+            daily_data = daily_res.get("daily", [])
+
+            if not daily_data:
+                return json.dumps({"success": False, "message": "No daily weather data", "data": None}, ensure_ascii=False)
+
+            today_daily = daily_data[0]
+            tomorrow_daily = daily_data[1] if len(daily_data) > 1 else None
+            
+            def parse_time_to_ts(time_str):
+                if not time_str:
+                    return 0
+                try:
+                    return int(datetime.fromisoformat(time_str).timestamp() * 1000)
+                except Exception:
+                    return 0
+                    
+            def safe_float(val, default=0.0):
+                if val is None or val == "":
+                    return default
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    return default
+
+            updated_at = int(datetime.now().timestamp() * 1000)
+            obs_time = parse_time_to_ts(now_data.get("obsTime"))
+
+            response_data = {
+                "now": {
+                    "updatedAt": updated_at,
+                    "obsTime": obs_time,
+                    "temp": safe_float(now_data.get("temp")),
+                    "feelsLike": safe_float(now_data.get("feelsLike")),
+                    "text": now_data.get("text", ""),
+                    "wind360": safe_float(now_data.get("wind360")),
+                    "windDir": now_data.get("windDir", ""),
+                    "windScale": safe_float(now_data.get("windScale")),
+                    "windSpeed": safe_float(now_data.get("windSpeed")),
+                    "humidity": safe_float(now_data.get("humidity")),
+                    "precip": safe_float(now_data.get("precip")),
+                    "pressure": safe_float(now_data.get("pressure")),
+                    "vis": safe_float(now_data.get("vis")),
+                    "cloud": safe_float(now_data.get("cloud")) if now_data.get("cloud") else None,
+                    "dew": safe_float(now_data.get("dew")) if now_data.get("dew") else None,
+                    
+                    "sunrise": today_daily.get("sunrise"),
+                    "sunset": today_daily.get("sunset"),
+                    "moonrise": today_daily.get("moonrise"),
+                    "moonset": today_daily.get("moonset"),
+                    "moonPhase": today_daily.get("moonPhase", ""),
+                    "moonPhaseIcon": today_daily.get("moonPhaseIcon", ""),
+                    "tempMax": safe_float(today_daily.get("tempMax")),
+                    "tempMin": safe_float(today_daily.get("tempMin")),
+                    "iconDay": today_daily.get("iconDay", ""),
+                    "textDay": today_daily.get("textDay", ""),
+                    "iconNight": today_daily.get("iconNight", ""),
+                    "textNight": today_daily.get("textNight", ""),
+                    "wind360Day": safe_float(today_daily.get("wind360Day")),
+                    "windDirDay": today_daily.get("windDirDay", ""),
+                    "windScaleDay": today_daily.get("windScaleDay", ""),
+                    "windSpeedDay": safe_float(today_daily.get("windSpeedDay")),
+                    "wind360Night": safe_float(today_daily.get("wind360Night")),
+                    "windDirNight": today_daily.get("windDirNight", ""),
+                    "windScaleNight": today_daily.get("windScaleNight", ""),
+                    "windSpeedNight": safe_float(today_daily.get("windSpeedNight")),
+                    "uvIndex": safe_float(today_daily.get("uvIndex"))
+                }
+            }
+
+            if tomorrow_daily:
+                response_data["tomorrow"] = {
+                    "sunrise": tomorrow_daily.get("sunrise"),
+                    "sunset": tomorrow_daily.get("sunset"),
+                    "moonrise": tomorrow_daily.get("moonrise"),
+                    "moonset": tomorrow_daily.get("moonset"),
+                    "moonPhase": tomorrow_daily.get("moonPhase", ""),
+                    "moonPhaseIcon": tomorrow_daily.get("moonPhaseIcon", ""),
+                    "tempMax": safe_float(tomorrow_daily.get("tempMax")),
+                    "tempMin": safe_float(tomorrow_daily.get("tempMin")),
+                    "iconDay": tomorrow_daily.get("iconDay", ""),
+                    "textDay": tomorrow_daily.get("textDay", ""),
+                    "iconNight": tomorrow_daily.get("iconNight", ""),
+                    "textNight": tomorrow_daily.get("textNight", ""),
+                    "wind360Day": safe_float(tomorrow_daily.get("wind360Day")),
+                    "windDirDay": tomorrow_daily.get("windDirDay", ""),
+                    "windScaleDay": tomorrow_daily.get("windScaleDay", ""),
+                    "windSpeedDay": safe_float(tomorrow_daily.get("windSpeedDay")),
+                    "wind360Night": safe_float(tomorrow_daily.get("wind360Night")),
+                    "windDirNight": tomorrow_daily.get("windDirNight", ""),
+                    "windScaleNight": tomorrow_daily.get("windScaleNight", ""),
+                    "windSpeedNight": safe_float(tomorrow_daily.get("windSpeedNight")),
+                    "humidity": safe_float(tomorrow_daily.get("humidity")),
+                    "precip": safe_float(tomorrow_daily.get("precip")),
+                    "pressure": safe_float(tomorrow_daily.get("pressure")),
+                    "vis": safe_float(tomorrow_daily.get("vis")),
+                    "cloud": safe_float(tomorrow_daily.get("cloud")) if tomorrow_daily.get("cloud") else None,
+                    "uvIndex": safe_float(tomorrow_daily.get("uvIndex"))
+                }
+
+            _weather_cache[cache_key] = response_data
+            return json.dumps({"success": True, "message": "Success", "data": response_data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"WeatherHandler error: {e}", exc_info=True)
+            return json.dumps({"success": False, "message": str(e), "data": None}, ensure_ascii=False)
+
