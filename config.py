@@ -79,6 +79,14 @@ available_setting = {
     "claude_uuid": "",
     "claude_api_key": "",
 
+    # 质量门配置
+    "quality_gate_enabled": False,
+    "quality_gate_cos_threshold": 0.80,
+    "quality_gate_max_retries": 2,
+    "quality_gate_judge_model": "qwen3-6b-flash",
+    "quality_gate_judge_api_key": "",  # judge 专用 key；不填则 fallback 到 claude_api_key
+    "siliconflow_api_key": "",
+
     "qwen_access_key_id": "",
     "qwen_access_key_secret": "",
     "qwen_agent_key": "",

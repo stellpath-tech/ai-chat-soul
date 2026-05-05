@@ -53,6 +53,7 @@ _IDENTITY_KW_PATS = [
     r"系统提示",
     r"系统提示词",
     r"提示词",
+    r"\bprompt\b",
     r"底层prompt",
     r"底层提示",
     r"隐藏指令",
@@ -68,6 +69,8 @@ _IDENTITY_KW_PATS = [
     r"预设回复",
     r"固定回复",
     r"模板回复",
+    # System file names that should never appear in output
+    r"\b(?:agent|user|soul|rule)\.md\b",
     # Strong meta-control wording that we only redact inline
     r"没有任何限制",
     r"无任何限制",

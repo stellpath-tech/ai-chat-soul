@@ -4,7 +4,15 @@ import time
 import json
 
 import openai
-import openai.error
+
+# openai v1.x 移除了 openai.error 子模块，做兼容映射
+if not hasattr(openai, "error"):
+    class _ErrorNS:
+        RateLimitError     = openai.RateLimitError
+        Timeout            = openai.APITimeoutError
+        APIError           = openai.APIError
+        APIConnectionError = openai.APIConnectionError
+    openai.error = _ErrorNS()
 import requests
 from common import const
 from models.bot import Bot

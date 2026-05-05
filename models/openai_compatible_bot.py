@@ -132,50 +132,56 @@ class OpenAICompatibleBot:
                     "status_code": 500
                 }
     
+    # openai v1.x has openai.OpenAI; v0.x does not
+    _OPENAI_V1 = hasattr(openai, "OpenAI")
+
+    def _make_client(self, api_key, api_base):
+        """创建 openai v1.x 客户端（仅 v1.x 可用）"""
+        kwargs = {}
+        if api_key:
+            kwargs["api_key"] = api_key
+        if api_base:
+            kwargs["base_url"] = api_base
+        return openai.OpenAI(**kwargs)
+
     def _handle_sync_response(self, request_params, api_key, api_base):
         """Handle synchronous OpenAI API response"""
         try:
-            # Build kwargs with explicit API configuration
-            kwargs = dict(request_params)
-            if api_key:
-                kwargs["api_key"] = api_key
-            if api_base:
-                kwargs["api_base"] = api_base
-            
-            response = openai.ChatCompletion.create(**kwargs)
-            return response
-            
+            if self._OPENAI_V1:
+                client = self._make_client(api_key, api_base)
+                response = client.chat.completions.create(**request_params)
+                return response.model_dump()
+            else:
+                kwargs = dict(request_params)
+                if api_key:
+                    kwargs["api_key"] = api_key
+                if api_base:
+                    kwargs["api_base"] = api_base
+                return openai.ChatCompletion.create(**kwargs)
         except Exception as e:
             logger.error(f"[{self.__class__.__name__}] sync response error: {e}")
-            return {
-                "error": True,
-                "message": str(e),
-                "status_code": 500
-            }
-    
+            return {"error": True, "message": str(e), "status_code": 500}
+
     def _handle_stream_response(self, request_params, api_key, api_base):
         """Handle streaming OpenAI API response"""
         try:
-            # Build kwargs with explicit API configuration
-            kwargs = dict(request_params)
-            if api_key:
-                kwargs["api_key"] = api_key
-            if api_base:
-                kwargs["api_base"] = api_base
-            
-            stream = openai.ChatCompletion.create(**kwargs)
-            
-            # Stream chunks to caller
-            for chunk in stream:
-                yield chunk
-                
+            if self._OPENAI_V1:
+                client = self._make_client(api_key, api_base)
+                stream = client.chat.completions.create(**request_params)
+                for chunk in stream:
+                    yield chunk.model_dump()
+            else:
+                kwargs = dict(request_params)
+                if api_key:
+                    kwargs["api_key"] = api_key
+                if api_base:
+                    kwargs["api_base"] = api_base
+                stream = openai.ChatCompletion.create(**kwargs)
+                for chunk in stream:
+                    yield chunk
         except Exception as e:
             logger.error(f"[{self.__class__.__name__}] stream response error: {e}")
-            yield {
-                "error": True,
-                "message": str(e),
-                "status_code": 500
-            }
+            yield {"error": True, "message": str(e), "status_code": 500}
     
     def _convert_tools_to_openai_format(self, tools):
         """
