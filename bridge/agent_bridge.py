@@ -16,6 +16,11 @@ from common import const
 from common.log import logger
 from common.utils import expand_path
 from models.openai_compatible_bot import OpenAICompatibleBot
+from agent.utils.hehe_harness import (
+    apply_consecutive_hehe_harness,
+    last_assistant_text,
+    replace_last_assistant_text,
+)
 
 
 def _image_to_data_url(image_path: str) -> str:
@@ -442,6 +447,7 @@ class AgentBridge:
             agent = self.get_agent(session_id=session_id)
             if not agent:
                 return Reply(ReplyType.ERROR, "Failed to initialize super agent")
+            previous_assistant_text = last_assistant_text(agent.messages)
             
             # Create event handler for logging and channel communication
             event_handler = AgentEventHandler(context=context, original_callback=on_event)
@@ -565,6 +571,14 @@ class AgentBridge:
                         logger.warning(f"[Redline] retry also triggered: type={_retry_trigger.type}")
                 except Exception as _re:
                     logger.warning(f"[Redline] retry failed: {_re}")
+
+            response, _hehe_changed = apply_consecutive_hehe_harness(
+                response,
+                previous_assistant_text,
+            )
+            if _hehe_changed:
+                replace_last_assistant_text(agent.messages, response)
+                logger.info("[HeheHarness] Removed repeated 嘿嘿 from final bridge response")
 
             self._sanitize_image_blocks_for_history(agent.messages)
 

@@ -9,6 +9,11 @@ from typing import List, Dict, Any, Optional, Callable, Tuple
 
 from agent.protocol.models import LLMRequest, LLMModel
 from agent.tools.base_tool import BaseTool, ToolResult
+from agent.utils.hehe_harness import (
+    apply_consecutive_hehe_harness,
+    contains_hehe,
+    last_assistant_text,
+)
 from common.log import logger
 
 
@@ -58,6 +63,7 @@ class AgentStreamExecutor:
 
         # Message history - use provided messages or create new list
         self.messages = messages if messages is not None else []
+        self.previous_dialog_assistant_text = last_assistant_text(self.messages)
         
         # Tool failure tracking for retry protection
         self.tool_failure_history = []  # List of (tool_name, args_hash, success) tuples
@@ -567,6 +573,7 @@ class AgentStreamExecutor:
 
         # Streaming response
         full_content = ""
+        defer_text_events = contains_hehe(self.previous_dialog_assistant_text)
         tool_calls_buffer = {}  # {index: {id, name, arguments}}
         stop_reason = None  # Track why the stream stopped
 
@@ -634,7 +641,7 @@ class AgentStreamExecutor:
                         # Filter out <think> tags from content
                         filtered_delta = self._filter_think_tags(content_delta)
                         full_content += filtered_delta
-                        if filtered_delta:  # Only emit if there's content after filtering
+                        if filtered_delta and not defer_text_events:
                             self._emit_event("message_update", {"delta": filtered_delta})
 
                     # Handle tool calls
@@ -801,6 +808,14 @@ class AgentStreamExecutor:
 
         # Filter full_content one more time (in case tags were split across chunks)
         full_content = self._filter_think_tags(full_content)
+        full_content, hehe_changed = apply_consecutive_hehe_harness(
+            full_content,
+            self.previous_dialog_assistant_text,
+        )
+        if hehe_changed:
+            logger.info("[HeheHarness] Removed repeated 嘿嘿 from consecutive assistant response")
+        if defer_text_events and full_content:
+            self._emit_event("message_update", {"delta": full_content})
         
         # Add assistant message to history (Claude format uses content blocks)
         assistant_msg = {"role": "assistant", "content": []}
