@@ -218,39 +218,68 @@ class AgentInitializer:
     def _get_runtime_info(self, workspace_root: str):
         """Get runtime information with dynamic time support"""
         from config import conf
-        
+
+        runtime_info = {
+            "model": conf().get("model", "unknown"),
+            "workspace": workspace_root,
+            "channel": conf().get("channel_type", "unknown"),
+        }
+
         def get_current_time():
             """Get current time dynamically - called each time system prompt is accessed"""
-            now = datetime.datetime.now()
-            
-            # Get timezone info
-            try:
-                offset = -time.timezone if not time.daylight else -time.altzone
-                hours = offset // 3600
-                minutes = (offset % 3600) // 60
-                timezone_name = f"UTC{hours:+03d}:{minutes:02d}" if minutes else f"UTC{hours:+03d}"
-            except Exception:
-                timezone_name = "UTC"
-            
+            # Check for request-specific timezone info injected by AgentBridge
+            tz_info = runtime_info.get("request_timezone")
+
+            if tz_info and "tz_offset_min" in tz_info:
+                try:
+                    offset_min = tz_info["tz_offset_min"]
+                    # Offset in minutes (e.g. East 8 is 480)
+                    tz = datetime.timezone(datetime.timedelta(minutes=offset_min))
+                    now = datetime.datetime.now(tz)
+
+                    # Determine timezone name
+                    tz_iana = tz_info.get("tz_iana", "")
+                    if tz_iana and "TimezoneInfo" in tz_iana:
+                        # Extract "Asia/Shanghai" from "TimezoneInfo(Asia/Shanghai, ...)"
+                        import re
+                        match = re.search(r'TimezoneInfo\(([^,)]+)', tz_iana)
+                        timezone_name = match.group(1) if match else tz_iana
+                    elif tz_iana:
+                        timezone_name = tz_iana
+                    else:
+                        hours = offset_min // 60
+                        minutes = abs(offset_min) % 60
+                        timezone_name = f"UTC{hours:+03d}:{minutes:02d}" if minutes else f"UTC{hours:+03d}"
+                except Exception as e:
+                    logger.warning(f"Failed to use request timezone: {e}")
+                    now = datetime.datetime.now()
+                    timezone_name = "UTC"
+            else:
+                now = datetime.datetime.now()
+                # Get local timezone info
+                try:
+                    offset = -time.timezone if not time.daylight else -time.altzone
+                    hours = offset // 3600
+                    minutes = (offset % 3600) // 60
+                    timezone_name = f"UTC{hours:+03d}:{minutes:02d}" if minutes else f"UTC{hours:+03d}"
+                except Exception:
+                    timezone_name = "UTC"
+
             # Chinese weekday mapping
             weekday_map = {
                 'Monday': '星期一', 'Tuesday': '星期二', 'Wednesday': '星期三',
                 'Thursday': '星期四', 'Friday': '星期五', 'Saturday': '星期六', 'Sunday': '星期日'
             }
             weekday_zh = weekday_map.get(now.strftime("%A"), now.strftime("%A"))
-            
+
             return {
                 'time': now.strftime("%Y-%m-%d %H:%M:%S"),
                 'weekday': weekday_zh,
                 'timezone': timezone_name
             }
-        
-        return {
-            "model": conf().get("model", "unknown"),
-            "workspace": workspace_root,
-            "channel": conf().get("channel_type", "unknown"),
-            "_get_current_time": get_current_time  # Dynamic time function
-        }
+
+        runtime_info["_get_current_time"] = get_current_time
+        return runtime_info
     
     def _migrate_config_to_env(self, workspace_root: str):
         """Migrate API keys from config.json to .env file"""

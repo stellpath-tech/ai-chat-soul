@@ -453,6 +453,7 @@ class WebChannel(ChatChannel):
             image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
             image_type = json_data.get('image_type', 'jpeg')  # 图片格式，默认 jpeg
             use_sse = json_data.get('stream', True)
+            timezone = json_data.get('timezone')
 
             request_id = self._generate_request_id()
             self.request_to_session[request_id] = session_id
@@ -491,6 +492,7 @@ class WebChannel(ChatChannel):
                 context["request_id"] = request_id
                 context["device_id"] = device_id
                 context["source"] = source
+                context["timezone"] = timezone
 
                 if use_sse:
                     context["on_event"] = self._make_sse_callback(request_id)
@@ -525,6 +527,7 @@ class WebChannel(ChatChannel):
             context["device_id"] = device_id
             context["source"] = source
             context["user_message"] = prompt
+            context["timezone"] = timezone
 
             if use_sse:
                 context["on_event"] = self._make_sse_callback(request_id)

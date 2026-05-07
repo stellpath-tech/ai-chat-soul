@@ -447,6 +447,14 @@ class AgentBridge:
             agent = self.get_agent(session_id=session_id)
             if not agent:
                 return Reply(ReplyType.ERROR, "Failed to initialize super agent")
+
+            # Inject request-specific timezone into agent's runtime_info
+            if context and context.get("timezone"):
+                agent.runtime_info["request_timezone"] = context.get("timezone")
+            else:
+                # Clear previous request's timezone if not provided in current request
+                agent.runtime_info.pop("request_timezone", None)
+
             previous_assistant_text = last_assistant_text(agent.messages)
             
             # Create event handler for logging and channel communication
