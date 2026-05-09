@@ -19,7 +19,7 @@ try:
 except Exception as e:
     pass
 
-handler_pool = ThreadPoolExecutor(max_workers=32)  # 澶勭悊娑堟伅鐨勭嚎绋嬫睜
+handler_pool = ThreadPoolExecutor(max_workers=1024)  # 澶勭悊娑堟伅鐨勭嚎绋嬫睜
 
 
 # 鎶借薄绫? 瀹冨寘鍚簡涓庢秷鎭€氶亾鏃犲叧鐨勯€氱敤澶勭悊閫昏緫
