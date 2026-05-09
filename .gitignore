@@ -38,3 +38,4 @@ client_config.json
 ref/
 .cursor/
 local/
+bench/results/
