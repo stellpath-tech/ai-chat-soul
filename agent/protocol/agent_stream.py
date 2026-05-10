@@ -468,44 +468,21 @@ class AgentStreamExecutor:
         return final_response
 
     def _apply_quality_gate(self, response: str, user_message: str) -> str:
-        """质量门：检查回复，不通过时注入反馈重试。失败时保守放行。"""
+        """Run the quality gate in audit-only mode and always return the original response."""
         try:
-            from agent.quality.gate import get_gate, retry_system_note
+            from agent.quality.gate import get_gate
             gate = get_gate()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"[QualityGate] init skipped: {e}")
             return response
         if gate is None:
             return response
 
         try:
-            from config import conf
-            max_retries = int(conf().get("quality_gate_max_retries", 2))
-        except Exception:
-            max_retries = 2
-
-        qr = gate.check(response, user_message)
-        logger.info(f"[QualityGate] {qr}")
-        if qr.passed:
-            return response
-
-        orig_system = self.system_prompt
-        try:
-            for attempt in range(max_retries):
-                feedback = qr.feedback_for_model()
-                self.system_prompt = orig_system + retry_system_note(feedback)
-                new_resp, _ = self._call_llm_stream(retry_on_empty=False)
-                if not new_resp:
-                    break
-                qr = gate.check(new_resp, user_message)
-                logger.info(f"[QualityGate] retry {attempt + 1}: {qr}")
-                response = new_resp
-                if qr.passed:
-                    break
+            qr = gate.check(response, user_message)
+            logger.info(f"[QualityGate] audit_only {qr}")
         except Exception as e:
-            logger.warning(f"[QualityGate] retry 失败，保留原回复: {e}")
-        finally:
-            self.system_prompt = orig_system
-
+            logger.warning(f"[QualityGate] audit failed: {e}")
         return response
 
     def _call_llm_stream(self, retry_on_empty=True, retry_count=0, max_retries=3,
