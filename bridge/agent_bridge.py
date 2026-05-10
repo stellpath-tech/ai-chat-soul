@@ -294,10 +294,11 @@ class AgentLLMModel(LLMModel):
             logger.error(f"AgentLLMModel call error: {e}")
             raise
     
-    def _stream_with_model(self, request: LLMRequest, model_id: str):
+    def _stream_with_model(self, request: LLMRequest, model_id: str, bot=None):
         """Inner generator: call bot with a specific model_id."""
-        if not hasattr(self.bot, 'call_with_tools'):
-            raise NotImplementedError(f"Bot {type(self.bot).__name__} does not support call_with_tools.")
+        b = bot if bot is not None else self.bot
+        if not hasattr(b, 'call_with_tools'):
+            raise NotImplementedError(f"Bot {type(b).__name__} does not support call_with_tools.")
         system_prompt = getattr(request, 'system', None)
         kwargs = {
             'messages': request.messages,
@@ -309,8 +310,29 @@ class AgentLLMModel(LLMModel):
             kwargs['max_tokens'] = request.max_tokens
         if system_prompt:
             kwargs['system'] = system_prompt
-        for chunk in self.bot.call_with_tools(**kwargs):
+        for chunk in b.call_with_tools(**kwargs):
             yield self._format_stream_chunk(chunk)
+
+    def _make_fallback_bot(self):
+        """Build an OpenAI-compatible bot pointed at the fallback API endpoint."""
+        from config import conf
+        from models.openai_compatible_bot import OpenAICompatibleBot
+        _api_key  = conf().get("fallback_api_key", "") or conf().get("ark_api_key", "")
+        _api_base = conf().get("fallback_api_base", "") or conf().get("ark_base_url", "")
+
+        class FallbackBot(OpenAICompatibleBot):
+            def get_api_config(self):
+                return {
+                    'api_key': _api_key,
+                    'api_base': _api_base,
+                    'model': conf().get("fallback_model", ""),
+                    'default_temperature': conf().get("temperature", 0.9),
+                    'default_top_p': conf().get("top_p", 1.0),
+                    'default_frequency_penalty': conf().get("frequency_penalty", 0.0),
+                    'default_presence_penalty': conf().get("presence_penalty", 0.0),
+                }
+
+        return FallbackBot()
 
     def call_stream(self, request: LLMRequest):
         """
@@ -325,7 +347,8 @@ class AgentLLMModel(LLMModel):
             if fallback_model:
                 logger.warning(f"[AgentLLMModel] switching to fallback model: {fallback_model!r}")
                 try:
-                    yield from self._stream_with_model(request, fallback_model)
+                    fallback_bot = self._make_fallback_bot()
+                    yield from self._stream_with_model(request, fallback_model, bot=fallback_bot)
                 except Exception as fe:
                     logger.error(f"[AgentLLMModel] fallback model also failed: {fe}", exc_info=True)
                     raise fe

@@ -89,6 +89,8 @@ available_setting = {
     "siliconflow_api_key": "",
     "enable_sensor_label": False,
     "fallback_model": "",
+    "fallback_api_key": "",
+    "fallback_api_base": "",
 
     "qwen_access_key_id": "",
     "qwen_access_key_secret": "",
