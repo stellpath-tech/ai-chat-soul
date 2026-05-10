@@ -57,6 +57,55 @@ def _build_direct_image_message(query: str, image_path: str) -> List[dict]:
     return content
 
 
+_sensor_label_cache: dict = {}  # (temp_bucket, humidity_bucket, text) -> label str
+
+
+def _weather_to_sensor_label(weather_data: dict) -> str:
+    """Call Doubao text model to convert raw weather data to sensor label(s).
+
+    Returns lines like:
+        温度感知：舒适
+        湿度感知：潮湿
+    """
+    now = weather_data.get("now", {})
+    temp     = now.get("temp", 0)
+    feels    = now.get("feelsLike", temp)
+    humidity = now.get("humidity", 0)
+    text     = now.get("text", "")
+
+    cache_key = (round(float(temp) / 2) * 2, round(float(humidity) / 10) * 10, text)
+    if cache_key in _sensor_label_cache:
+        return _sensor_label_cache[cache_key]
+
+    from config import conf
+    api_key   = conf().get("ark_api_key", "")
+    base_url  = conf().get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+    model     = conf().get("doubao_text_model", "doubao-lite-32k")
+
+    prompt = "\n".join([
+        "根据天气数据选出适用的传感器标签，每行一个，格式为[类别:标签]，不要解释。",
+        "",
+        f"温度:{temp}C 体感:{feels}C 湿度:{humidity}% 天气:{text}",
+        "",
+        "温度标签(必选一个): 温度感知:寒冷 / 温度感知:凉爽 / 温度感知:舒适 / 温度感知:温暖 / 温度感知:炎热",
+        "湿度标签(湿度>=75才选): 湿度感知:潮湿",
+        "只输出标签行，用换行分隔，不要方括号。",
+    ])
+
+    import requests
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"model": model, "messages": [{"role": "user", "content": prompt}],
+              "max_tokens": 32, "temperature": 0},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    label = resp.json()["choices"][0]["message"]["content"].strip()
+    _sensor_label_cache[cache_key] = label
+    return label
+
+
 def _describe_image_with_doubao(image_path: str) -> str:
     """Call Doubao VL to describe the image in ≤30 chars. Returns the raw description string."""
     import base64
@@ -245,44 +294,43 @@ class AgentLLMModel(LLMModel):
             logger.error(f"AgentLLMModel call error: {e}")
             raise
     
+    def _stream_with_model(self, request: LLMRequest, model_id: str):
+        """Inner generator: call bot with a specific model_id."""
+        if not hasattr(self.bot, 'call_with_tools'):
+            raise NotImplementedError(f"Bot {type(self.bot).__name__} does not support call_with_tools.")
+        system_prompt = getattr(request, 'system', None)
+        kwargs = {
+            'messages': request.messages,
+            'tools': getattr(request, 'tools', None),
+            'stream': True,
+            'model': model_id,
+        }
+        if request.max_tokens is not None:
+            kwargs['max_tokens'] = request.max_tokens
+        if system_prompt:
+            kwargs['system'] = system_prompt
+        for chunk in self.bot.call_with_tools(**kwargs):
+            yield self._format_stream_chunk(chunk)
+
     def call_stream(self, request: LLMRequest):
         """
-        Call the model with streaming using COW's bot infrastructure
+        Call the model with streaming. On API error, retry with fallback_model if configured.
         """
+        from config import conf
+        fallback_model = conf().get("fallback_model", "")
         try:
-            if hasattr(self.bot, 'call_with_tools'):
-                # Use tool-enabled streaming call if available
-                # Extract system prompt if present
-                system_prompt = getattr(request, 'system', None)
-                
-                # Build kwargs for call_with_tools
-                kwargs = {
-                    'messages': request.messages,
-                    'tools': getattr(request, 'tools', None),
-                    'stream': True,
-                    'model': self.model  # Pass model parameter
-                }
-                
-                # Only pass max_tokens if explicitly set, let the bot use its default
-                if request.max_tokens is not None:
-                    kwargs['max_tokens'] = request.max_tokens
-                
-                # Add system prompt if present
-                if system_prompt:
-                    kwargs['system'] = system_prompt
-                
-                stream = self.bot.call_with_tools(**kwargs)
-                
-                # Convert stream format to our expected format
-                for chunk in stream:
-                    yield self._format_stream_chunk(chunk)
-            else:
-                bot_type = type(self.bot).__name__
-                raise NotImplementedError(f"Bot {bot_type} does not support call_with_tools. Please add the method.")
-                
+            yield from self._stream_with_model(request, self.model)
         except Exception as e:
-            logger.error(f"AgentLLMModel call_stream error: {e}", exc_info=True)
-            raise
+            logger.error(f"AgentLLMModel call_stream error (model={self.model}): {e}", exc_info=True)
+            if fallback_model:
+                logger.warning(f"[AgentLLMModel] switching to fallback model: {fallback_model!r}")
+                try:
+                    yield from self._stream_with_model(request, fallback_model)
+                except Exception as fe:
+                    logger.error(f"[AgentLLMModel] fallback model also failed: {fe}", exc_info=True)
+                    raise fe
+            else:
+                raise
     
     def _format_response(self, response):
         """Format Claude response to our expected format"""
@@ -452,8 +500,18 @@ class AgentBridge:
             if context and context.get("timezone"):
                 agent.runtime_info["request_timezone"] = context.get("timezone")
             else:
-                # Clear previous request's timezone if not provided in current request
                 agent.runtime_info.pop("request_timezone", None)
+
+            # 前端在 GET /api/weather 时已拿到 sensor_label，直接注入（由 enable_sensor_label 开关控制）
+            from config import conf as _conf
+            if _conf().get("enable_sensor_label", False):
+                sensor_label = context.get("sensor_label") if context else None
+                if sensor_label:
+                    agent.runtime_info["sensor_label"] = sensor_label
+                else:
+                    agent.runtime_info.pop("sensor_label", None)
+            else:
+                agent.runtime_info.pop("sensor_label", None)
 
             previous_assistant_text = last_assistant_text(agent.messages)
             

@@ -21,19 +21,6 @@ import logging
 import channel.web.database as db
 from channel.web.metrics import MetricsHandler, metrics_processor, USER_AUTH_TOTAL
 
-# POST /message：仅本轮追加到 Agent system，约定可选情绪前缀（需 config 中 agent=true）
-_WEB_MESSAGE_EMOTION_APPEND = """## Web 回复可选情绪前缀
-
-若需要向用户传递你当下的情绪，可在**整条回复最开头**（正文第一个字之前）加一个形如 $$xxx$$ 的情绪前缀。
-
-**你仅可选择以下情绪前缀：**
-- `$$HAPPY$$`（开心）
-- `$$SHY$$`（害羞）
-
-注意不要选择除上述情绪前缀外的任何词或格式，否则地球会毁灭。
-
-注意情绪前缀不要随便加， 大部分情况下不要加， 只有极少数情况需要表达i情绪，比如情绪足够鲜明，且与情绪极度相关时才需要添加；
-如果你在没有强烈相关情绪的情况下随意添加，我就不会给你小费，但如果你准确一点，我就会给你 200$ 小费"""
 
 class WebMessage(ChatMessage):
     def __init__(
@@ -453,7 +440,8 @@ class WebChannel(ChatChannel):
             image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
             image_type = json_data.get('image_type', 'jpeg')  # 图片格式，默认 jpeg
             use_sse = json_data.get('stream', True)
-            timezone = json_data.get('timezone')
+            timezone     = json_data.get('timezone')
+            sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传
 
             request_id = self._generate_request_id()
             self.request_to_session[request_id] = session_id
@@ -492,12 +480,12 @@ class WebChannel(ChatChannel):
                 context["request_id"] = request_id
                 context["device_id"] = device_id
                 context["source"] = source
-                context["timezone"] = timezone
+                context["timezone"]     = timezone
+                context["sensor_label"] = sensor_label
 
                 if use_sse:
                     context["on_event"] = self._make_sse_callback(request_id)
 
-                context["append_system_prompt"] = _WEB_MESSAGE_EMOTION_APPEND
 
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
@@ -527,12 +515,11 @@ class WebChannel(ChatChannel):
             context["device_id"] = device_id
             context["source"] = source
             context["user_message"] = prompt
-            context["timezone"] = timezone
+            context["timezone"]     = timezone
+            context["sensor_label"] = sensor_label
 
             if use_sse:
                 context["on_event"] = self._make_sse_callback(request_id)
-
-            context["append_system_prompt"] = _WEB_MESSAGE_EMOTION_APPEND
 
             # DEVICE 来源：将用户消息写入聊天记录队列
             if source == "DEVICE" and device_id:
@@ -1133,6 +1120,17 @@ class WeatherHandler:
                     "cloud": safe_float(tomorrow_daily.get("cloud")) if tomorrow_daily.get("cloud") else None,
                     "uvIndex": safe_float(tomorrow_daily.get("uvIndex"))
                 }
+
+            # 在天气数据拉取时就解析传感器标签（由 enable_sensor_label 开关控制）
+            if conf().get("enable_sensor_label", False):
+                try:
+                    from bridge.agent_bridge import _weather_to_sensor_label
+                    response_data["sensor_label"] = _weather_to_sensor_label(response_data)
+                except Exception as _se:
+                    logger.warning(f"[WeatherHandler] sensor_label failed: {_se}")
+                    response_data["sensor_label"] = ""
+            else:
+                response_data["sensor_label"] = ""
 
             _weather_cache[cache_key] = response_data
             return json.dumps({"success": True, "message": "Success", "data": response_data}, ensure_ascii=False)

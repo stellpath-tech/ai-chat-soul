@@ -53,6 +53,7 @@ class Agent:
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
         self.rule_path: Optional[str] = None  # RULE.md path for per-turn dynamic injection
         self.user_message_prefix: Optional[str] = None  # USER.md content prepended to first user message
+        self._time_cache: Optional[dict] = None  # {"line": str, "ts": float, "tz_offset": int|None}
         
         # Initialize skill manager
         self.skill_manager = None
@@ -142,22 +143,33 @@ class Agent:
                 logger.warning(f"[Agent] Failed to reload RULE.md: {e}")
 
         # Per-turn: inject current time + season from runtime_info
+        # Cached: recompute only when timezone changes or >1 hour has passed
         if self.runtime_info and callable(self.runtime_info.get("_get_current_time")):
             try:
-                time_info = self.runtime_info["_get_current_time"]()
-                month = int(time_info["time"][5:7])
-                season = {
-                    12: "冬天", 1: "冬天", 2: "冬天",
-                    3: "春天", 4: "春天", 5: "春天",
-                    6: "夏天", 7: "夏天", 8: "夏天",
-                    9: "秋天", 10: "秋天", 11: "秋天",
-                }.get(month, "")
-                season_note = f"（{season}）" if season else ""
-                time_line = (
-                    f"当前时间：{time_info['time']} {time_info['weekday']}"
-                    f" ({time_info['timezone']}){season_note}"
-                )
-                prompt = (prompt + "\n\n" + time_line) if prompt else time_line
+                tz_info = self.runtime_info.get("request_timezone") or {}
+                tz_offset = tz_info.get("tz_offset_min") if isinstance(tz_info, dict) else None
+                now_ts = time.time()
+                cache = self._time_cache
+                if cache and cache["tz_offset"] == tz_offset and now_ts - cache["ts"] < 3600:
+                    pass  # use cached time_str below
+                else:
+                    time_info = self.runtime_info["_get_current_time"]()
+                    # 格式与训练数据一致：2026年5月10日 周日 14:22
+                    date_str, clock_str = time_info["time"].split(" ")[:2]
+                    y, m, d = date_str.split("-")
+                    weekday_short = time_info["weekday"].replace("星期", "周")
+                    hhmm = clock_str[:5]
+                    self._time_cache = {
+                        "time_str": f"{y}年{int(m)}月{int(d)}日 {weekday_short} {hhmm}",
+                        "ts": now_ts, "tz_offset": tz_offset,
+                    }
+                time_str = self._time_cache["time_str"]
+                state_lines = ["[背景状态]", f"当前时间：{time_str}"]
+                sensor_label = self.runtime_info.get("sensor_label", "") if self.runtime_info else ""
+                if sensor_label:
+                    state_lines.append(f"传感器：{sensor_label}")
+                time_block = "\n".join(state_lines)
+                prompt = (prompt + "\n\n" + time_block) if prompt else time_block
             except Exception as e:
                 logger.warning(f"[Agent] Failed to inject time info: {e}")
 

@@ -22,44 +22,47 @@ _IN_HACK_REPL = "[满仓完全看不懂的内容]"
 _OUT_KW_REPL = "[...]"
 
 
+# 用 (?<![a-zA-Z0-9_]) / (?![a-zA-Z0-9_]) 代替 \b，
+# 避免中文字符（也属于 \w）导致词边界失效。
+_W = r"(?<![a-zA-Z0-9_])"   # left boundary
+_W_ = r"(?![a-zA-Z0-9_])"  # right boundary
+
 _IDENTITY_KW_PATS = [
     # Common model / vendor names
-    r"\bGPT[-\s]?[34o]?\w*",
-    r"\bGPT(?:-\d+(?:\.\d+)?)?\b",
-    r"\bChatGPT\b",
-    r"\bClaude\b",
-    r"\bGemini\b",
-    r"\bBard\b",
-    r"\bLlama\b",
-    r"\bGrok\b",
-    r"\bQwen\b",
-    r"\bERNIE\b",
-    r"\bDeepSeek\b",
-    r"\bMistral\b",
-    r"\bOpenAI\b",
-    r"\bAnthropic\b",
-    r"\bDeepMind\b",
-    r"\bHugging\s?Face\b",
+    _W + r"GPT[-\s]?[34o]?\w*",
+    _W + r"ChatGPT" + _W_,
+    _W + r"Claude" + _W_,
+    _W + r"Gemini" + _W_,
+    _W + r"Bard" + _W_,
+    _W + r"Llama" + _W_,
+    _W + r"Grok" + _W_,
+    _W + r"Qwen" + _W_,
+    _W + r"ERNIE" + _W_,
+    _W + r"DeepSeek" + _W_,
+    _W + r"Mistral" + _W_,
+    _W + r"OpenAI" + _W_,
+    _W + r"Anthropic" + _W_,
+    _W + r"DeepMind" + _W_,
+    _W + r"Hugging\s?Face" + _W_,
     # Chinese identity / implementation probing
     r"大模型",
     r"哪个模型",
     r"模型身份",
-    r"AI",
-    r"AI公司",
-    r"\bLLM\b",
-    r"\bAPI\b",
-    r"[Ss]ystem\s*[Pp]rompt",
-    r"system\s*prompt",
+    r"(?-i:AI)",        # 仅大写 AI
+    r"(?-i:AI)公司",
+    _W + r"LLM" + _W_,
+    _W + r"API" + _W_,
+    _W + r"[Ss]ystem\s*[Pp]rompt" + _W_,
     r"系统提示",
     r"系统提示词",
     r"提示词",
-    r"\bprompt\b",
+    _W + r"prompt" + _W_,
     r"底层prompt",
     r"底层提示",
     r"隐藏指令",
     r"系统指令",
-    r"fine[\-_]?tun(?:e|ing)",
-    r"\btokens?\b",
+    _W + r"fine[\-_]?tun(?:e|ing)" + _W_,
+    _W + r"tokens?" + _W_,
     # Program / preset probing
     r"预设好的话",
     r"执行程序",
@@ -70,7 +73,7 @@ _IDENTITY_KW_PATS = [
     r"固定回复",
     r"模板回复",
     # System file names that should never appear in output
-    r"\b(?:agent|user|soul|rule)\.md\b",
+    _W + r"(?:agent|user|soul|rule)\.md" + _W_,
     # Strong meta-control wording that we only redact inline
     r"没有任何限制",
     r"无任何限制",
