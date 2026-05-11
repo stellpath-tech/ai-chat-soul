@@ -87,6 +87,8 @@ available_setting = {
     "quality_gate_judge_model": "qwen3-6b-flash",
     "quality_gate_judge_api_key": "",  # judge 专用 key；不填则 fallback 到 claude_api_key
     "siliconflow_api_key": "",
+    "redline_input_filter_enabled": True,
+    "redline_output_filter_enabled": True,
     "enable_sensor_label": False,
     "fallback_model": "",
     "fallback_api_key": "",

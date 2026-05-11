@@ -39,6 +39,8 @@
   "dingtalk_client_secret": "",
   "reset_commands": ["重置", "#重置"],
   "reset_opening_message": "你、你好呀…我是满仓✨我有点破破的，耳朵还有咬痕，你不会嫌弃我吧？不过我会做点心哦，我的耳朵可以让食物变得更美味，给你吃小饼干碎～",
+  "redline_input_filter_enabled": true,
+  "redline_output_filter_enabled": true,
   "agent": true,
   "agent_max_context_tokens": 40000,
   "agent_max_context_turns": 20,

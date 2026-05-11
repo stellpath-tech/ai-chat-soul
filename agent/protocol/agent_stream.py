@@ -4,6 +4,7 @@ Agent Stream Execution Module - Multi-turn reasoning based on tool-call
 Provides streaming output, event system, and complete tool-call loop
 """
 import json
+import threading
 import time
 from typing import List, Dict, Any, Optional, Callable, Tuple
 
@@ -468,21 +469,40 @@ class AgentStreamExecutor:
         return final_response
 
     def _apply_quality_gate(self, response: str, user_message: str) -> str:
-        """Run the quality gate in audit-only mode and always return the original response."""
+        """Queue quality-gate auditing in the background and return immediately."""
         try:
-            from agent.quality.gate import get_gate
-            gate = get_gate()
+            from config import conf
+            if not conf().get("quality_gate_enabled", False):
+                return response
         except Exception as e:
-            logger.warning(f"[QualityGate] init skipped: {e}")
-            return response
-        if gate is None:
+            logger.warning(f"[QualityGate] config check skipped: {e}")
             return response
 
+        def _audit(resp: str, user_msg: str) -> None:
+            try:
+                from agent.quality.gate import get_gate
+                gate = get_gate()
+            except Exception as e:
+                logger.warning(f"[QualityGate] init skipped: {e}")
+                return
+            if gate is None:
+                return
+
+            try:
+                qr = gate.check(resp, user_msg)
+                logger.info(f"[QualityGate] audit_only_async {qr}")
+            except Exception as e:
+                logger.warning(f"[QualityGate] async audit failed: {e}")
+
         try:
-            qr = gate.check(response, user_message)
-            logger.info(f"[QualityGate] audit_only {qr}")
+            threading.Thread(
+                target=_audit,
+                args=(response, user_message),
+                name="quality-gate-audit",
+                daemon=True,
+            ).start()
         except Exception as e:
-            logger.warning(f"[QualityGate] audit failed: {e}")
+            logger.warning(f"[QualityGate] async audit queue failed: {e}")
         return response
 
     def _call_llm_stream(self, retry_on_empty=True, retry_count=0, max_retries=3,

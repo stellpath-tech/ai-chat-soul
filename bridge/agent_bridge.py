@@ -615,17 +615,18 @@ class AgentBridge:
                 user_message = query
 
             # Input redline filter
-            from agent.utils.redline import filter_input
-            if isinstance(user_message, str):
-                user_message, _in_trigger = filter_input(user_message)
-                if _in_trigger:
-                    logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
-            elif isinstance(user_message, list):
-                for block in user_message:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        block["text"], _in_trigger = filter_input(block.get("text", ""))
-                        if _in_trigger:
-                            logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
+            if _conf().get("redline_input_filter_enabled", True):
+                from agent.utils.redline import filter_input
+                if isinstance(user_message, str):
+                    user_message, _in_trigger = filter_input(user_message)
+                    if _in_trigger:
+                        logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
+                elif isinstance(user_message, list):
+                    for block in user_message:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            block["text"], _in_trigger = filter_input(block.get("text", ""))
+                            if _in_trigger:
+                                logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
@@ -643,23 +644,24 @@ class AgentBridge:
                 event_handler.log_summary()
 
             # Output redline filter — retry once if triggered
-            from agent.utils.redline import filter_output
-            _, _out_trigger = filter_output(response)
-            if _out_trigger:
-                logger.info(f"[Redline] output triggered: type={_out_trigger.type} matched={_out_trigger.matched!r}, retrying")
-                _RETRY_MSG = "[用户发来了满仓完全看不懂的内容]"
-                try:
-                    response = agent.run_stream(
-                        user_message=_RETRY_MSG,
-                        on_event=event_handler.handle_event,
-                        clear_history=False,
-                        append_system=append_system,
-                    )
-                    _, _retry_trigger = filter_output(response)
-                    if _retry_trigger:
-                        logger.warning(f"[Redline] retry also triggered: type={_retry_trigger.type}")
-                except Exception as _re:
-                    logger.warning(f"[Redline] retry failed: {_re}")
+            if _conf().get("redline_output_filter_enabled", True):
+                from agent.utils.redline import filter_output
+                _, _out_trigger = filter_output(response)
+                if _out_trigger:
+                    logger.info(f"[Redline] output triggered: type={_out_trigger.type} matched={_out_trigger.matched!r}, retrying")
+                    _RETRY_MSG = "[用户发来了满仓完全看不懂的内容]"
+                    try:
+                        response = agent.run_stream(
+                            user_message=_RETRY_MSG,
+                            on_event=event_handler.handle_event,
+                            clear_history=False,
+                            append_system=append_system,
+                        )
+                        _, _retry_trigger = filter_output(response)
+                        if _retry_trigger:
+                            logger.warning(f"[Redline] retry also triggered: type={_retry_trigger.type}")
+                    except Exception as _re:
+                        logger.warning(f"[Redline] retry failed: {_re}")
 
             response, _hehe_changed = apply_consecutive_hehe_harness(
                 response,
