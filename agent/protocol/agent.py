@@ -114,29 +114,42 @@ class Agent:
         # Per-turn: reload and append RULE.md（含颜文字随机注入）
         if self.rule_path and os.path.exists(self.rule_path):
             try:
+                from config import conf
+
+                random_style_enabled = bool(conf().get("random_style_injection_enabled", True))
+                random_kaomoji_enabled = bool(conf().get("random_kaomoji_injection_enabled", True))
+
                 with open(self.rule_path, 'r', encoding='utf-8') as f:
                     rule_content = f.read().strip()
                 if rule_content:
                     # 随机分配本轮颜文字，替换 {kaomoji_today} 占位符
                     if "{kaomoji_today}" in rule_content:
-                        try:
-                            from agent.utils.kaomoji import pick_kaomoji
-                            _km = pick_kaomoji()
-                            self._last_kaomoji = _km   # 供 run_stream 注入用户消息
-                            rule_content = rule_content.replace("{kaomoji_today}", _km)
-                        except Exception as _ke:
-                            logger.warning(f"[Agent] kaomoji injection failed: {_ke}")
+                        if random_kaomoji_enabled:
+                            try:
+                                from agent.utils.kaomoji import pick_kaomoji
+                                _km = pick_kaomoji()
+                                self._last_kaomoji = _km   # 供 run_stream 注入用户消息
+                                rule_content = rule_content.replace("{kaomoji_today}", _km)
+                            except Exception as _ke:
+                                logger.warning(f"[Agent] kaomoji injection failed: {_ke}")
+                                self._last_kaomoji = ""
+                                rule_content = rule_content.replace("{kaomoji_today}", "")
+                        else:
                             self._last_kaomoji = ""
+                            rule_content = rule_content.replace("{kaomoji_today}", "")
                     else:
                         self._last_kaomoji = ""
                     # 随机分配本轮风格模式，替换 {style_today} 占位符
                     if "{style_today}" in rule_content:
-                        try:
-                            from agent.utils.style import pick_style
-                            _style = pick_style()
-                            rule_content = rule_content.replace("{style_today}", _style)
-                        except Exception as _se:
-                            logger.warning(f"[Agent] style injection failed: {_se}")
+                        if random_style_enabled:
+                            try:
+                                from agent.utils.style import pick_style
+                                _style = pick_style()
+                                rule_content = rule_content.replace("{style_today}", _style)
+                            except Exception as _se:
+                                logger.warning(f"[Agent] style injection failed: {_se}")
+                                rule_content = rule_content.replace("{style_today}", "")
+                        else:
                             rule_content = rule_content.replace("{style_today}", "")
                     prompt = (prompt + "\n\n" + rule_content) if prompt else rule_content
             except Exception as e:

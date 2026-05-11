@@ -214,6 +214,8 @@ available_setting = {
     "agent_max_context_tokens": 50000,
     "agent_max_context_turns": 30,
     "agent_max_steps": 15,
+    "random_style_injection_enabled": True,
+    "random_kaomoji_injection_enabled": True,
 }
 class Config(dict):
     def __init__(self, d=None):
