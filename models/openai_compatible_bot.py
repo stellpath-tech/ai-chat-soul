@@ -160,7 +160,7 @@ class OpenAICompatibleBot:
             http_client = httpx.Client(timeout=_timeout, proxy=None)
         else:
             http_client = httpx.Client(timeout=_timeout)
-        kwargs = {"http_client": http_client}
+        kwargs = {"http_client": http_client, "max_retries": 0}
         if api_key:
             kwargs["api_key"] = api_key
         if api_base:
