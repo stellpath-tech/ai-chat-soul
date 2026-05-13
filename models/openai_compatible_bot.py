@@ -8,6 +8,7 @@ This includes: OpenAI, LinkAI, Azure OpenAI, and many third-party providers.
 """
 
 import json
+import httpx
 import openai
 from common.log import logger
 
@@ -137,7 +138,9 @@ class OpenAICompatibleBot:
 
     def _make_client(self, api_key, api_base):
         """创建 openai v1.x 客户端（仅 v1.x 可用）"""
-        kwargs = {}
+        kwargs = {
+            "timeout": httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
+        }
         if api_key:
             kwargs["api_key"] = api_key
         if api_base:
