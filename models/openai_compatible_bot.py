@@ -155,7 +155,7 @@ class OpenAICompatibleBot:
     def _make_client(self, api_key, api_base):
         """创建 openai v1.x 客户端（仅 v1.x 可用）"""
         kwargs = {
-            "timeout": httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=15.0),
+            "timeout": httpx.Timeout(connect=15.0, read=20.0, write=15.0, pool=15.0),
         }
         if api_key:
             kwargs["api_key"] = api_key

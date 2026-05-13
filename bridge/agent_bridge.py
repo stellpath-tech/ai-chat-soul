@@ -23,6 +23,18 @@ from agent.utils.hehe_harness import (
 )
 
 
+_CONN_ERROR_KEYWORDS = (
+    "ssl", "eof", "connection", "timeout", "timed out", "network",
+    "transport", "remoteprotocol", "readtimeout", "connecterror",
+    "apiconnection", "max retries exceeded", "communicating with openai",
+)
+
+def _is_conn_error_msg(msg: str) -> bool:
+    """根据错误消息判断是否为连接/SSL 类错误（应立即触发 fallback）。"""
+    lower = msg.lower()
+    return any(k in lower for k in _CONN_ERROR_KEYWORDS)
+
+
 def _image_to_data_url(image_path: str) -> str:
     import base64
 
@@ -313,7 +325,10 @@ class AgentLLMModel(LLMModel):
         for chunk in b.call_with_tools(**kwargs):
             formatted = self._format_stream_chunk(chunk)
             if isinstance(formatted, dict) and formatted.get('error'):
-                raise Exception(formatted.get('message', 'API error'))
+                msg = formatted.get('message', 'API error')
+                # 连接/SSL 类错误 raise 触发 fallback；过载/限速等 API 错误走 error chunk 让上层重试
+                if _is_conn_error_msg(msg):
+                    raise Exception(msg)
             yield formatted
 
     def _make_fallback_bot(self):
