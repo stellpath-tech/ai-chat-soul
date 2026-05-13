@@ -311,7 +311,10 @@ class AgentLLMModel(LLMModel):
         if system_prompt:
             kwargs['system'] = system_prompt
         for chunk in b.call_with_tools(**kwargs):
-            yield self._format_stream_chunk(chunk)
+            formatted = self._format_stream_chunk(chunk)
+            if isinstance(formatted, dict) and formatted.get('error'):
+                raise Exception(formatted.get('message', 'API error'))
+            yield formatted
 
     def _make_fallback_bot(self):
         """Build an OpenAI-compatible bot pointed at the fallback API endpoint."""
