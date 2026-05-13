@@ -176,6 +176,7 @@ class OpenAICompatibleBot:
                     kwargs["api_key"] = api_key
                 if api_base:
                     kwargs["api_base"] = api_base
+                kwargs.setdefault("request_timeout", 20)
                 return openai.ChatCompletion.create(**kwargs)
         except Exception as e:
             logger.error(f"[{self.__class__.__name__}] sync response error: {e}")
@@ -195,6 +196,7 @@ class OpenAICompatibleBot:
                     kwargs["api_key"] = api_key
                 if api_base:
                     kwargs["api_base"] = api_base
+                kwargs.setdefault("request_timeout", 20)  # v0.x 超时，防止代理挂死
                 stream = openai.ChatCompletion.create(**kwargs)
                 for chunk in stream:
                     yield chunk
