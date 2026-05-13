@@ -13,6 +13,22 @@ import openai
 from common.log import logger
 
 
+def _is_connection_error(exc: Exception) -> bool:
+    """SSL / TCP 连接类错误：代理挂掉时立即失败，无需重试，直接触发 fallback。"""
+    name = type(exc).__name__
+    keywords = ("Connection", "Timeout", "SSL", "Network", "Transport",
+                "RemoteProtocol", "ReadTimeout", "ConnectError", "APIConnection")
+    if any(k in name for k in keywords):
+        return True
+    module = getattr(type(exc), "__module__", "") or ""
+    if "httpx" in module or "ssl" in module:
+        return True
+    # openai SDK 把底层连接错误包装成 APIConnectionError
+    if isinstance(exc, openai.APIConnectionError):
+        return True
+    return False
+
+
 class OpenAICompatibleBot:
     """
     Base class for OpenAI-compatible bots.
@@ -139,7 +155,7 @@ class OpenAICompatibleBot:
     def _make_client(self, api_key, api_base):
         """创建 openai v1.x 客户端（仅 v1.x 可用）"""
         kwargs = {
-            "timeout": httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
+            "timeout": httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=15.0),
         }
         if api_key:
             kwargs["api_key"] = api_key
@@ -184,6 +200,8 @@ class OpenAICompatibleBot:
                     yield chunk
         except Exception as e:
             logger.error(f"[{self.__class__.__name__}] stream response error: {e}")
+            if _is_connection_error(e):
+                raise  # 连接/SSL 错误直接抛出，由上层 fallback 处理
             yield {"error": True, "message": str(e), "status_code": 500}
     
     def _convert_tools_to_openai_format(self, tools):
