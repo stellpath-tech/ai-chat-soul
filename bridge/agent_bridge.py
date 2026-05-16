@@ -55,7 +55,14 @@ def _build_direct_image_message(query: str, image_path: str = None, image_url: s
     from config import conf
 
     detail = conf().get("image_agent_openai_detail", "auto")
-    url = image_url if image_url else _image_to_data_url(image_path)
+    if image_url:
+        import base64, requests as _req
+        r = _req.get(image_url, timeout=20)
+        r.raise_for_status()
+        ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+        url = f"data:{ct};base64,{base64.b64encode(r.content).decode()}"
+    else:
+        url = _image_to_data_url(image_path)
     image_block = {
         "type": "image_url",
         "image_url": {"url": url},
@@ -199,8 +206,23 @@ def _describe_image_with_doubao(image_path: str) -> str:
 
 
 def _describe_image_with_doubao_url(image_url: str) -> str:
-    """Call Doubao VL with a remote URL to create a compact visual memory."""
+    """Download image from URL server-side, then call Doubao VL with base64.
+
+    OSS buckets may restrict access by IP/Referer, so we download the image
+    ourselves (server has the signed URL) and re-encode rather than passing
+    the raw URL to Doubao's download service.
+    """
+    import base64
+    import requests
     from config import conf
+
+    # Download the image from the URL
+    r = requests.get(image_url, timeout=20)
+    r.raise_for_status()
+    image_bytes = r.content
+    content_type = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:{content_type};base64,{b64}"
 
     vl_model = conf().get("doubao_vl_model", "doubao-seed-2-0-mini-260215")
     api_key = conf().get("ark_api_key", "")
@@ -215,14 +237,13 @@ def _describe_image_with_doubao_url(image_url: str) -> str:
         ),
     )
 
-    import requests
     payload = {
         "model": vl_model,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "image_url", "image_url": {"url": data_url}},
                     {"type": "text", "text": prompt},
                 ],
             }
