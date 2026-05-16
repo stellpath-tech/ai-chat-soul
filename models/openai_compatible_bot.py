@@ -154,7 +154,7 @@ class OpenAICompatibleBot:
 
     def _make_client(self, api_key, api_base):
         """创建 openai v1.x 客户端（仅 v1.x 可用）"""
-        _timeout = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=10.0)
+        _timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=10.0)
         # 非 OpenAI 官方地址（如国内豆包 Ark）直连，不走系统代理
         if api_base and "openai.com" not in api_base:
             http_client = httpx.Client(timeout=_timeout, proxy=None)
