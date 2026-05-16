@@ -440,6 +440,13 @@ class WebChannel(ChatChannel):
             image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
             image_url_input = json_data.get('image_url', '')  # OSS/CDN URL（可选，与 image 二选一）
             image_type = json_data.get('image_type', 'jpeg')  # 图片格式，默认 jpeg
+            # 兼容前端把图片 URL 直接写在 message 文本里的情况
+            if not image_url_input and not image_b64 and prompt:
+                import re as _re
+                _url_match = _re.search(r'https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?', prompt, _re.IGNORECASE)
+                if _url_match:
+                    image_url_input = _url_match.group(0)
+                    prompt = prompt[:_url_match.start()].strip() or prompt[_url_match.end():].strip()
             use_sse = json_data.get('stream', True)
             timezone     = json_data.get('timezone')
             sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传
