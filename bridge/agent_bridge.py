@@ -56,11 +56,7 @@ def _build_direct_image_message(query: str, image_path: str = None, image_url: s
 
     detail = conf().get("image_agent_openai_detail", "auto")
     if image_url:
-        import base64, requests as _req
-        r = _req.get(image_url, timeout=20)
-        r.raise_for_status()
-        ct = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-        url = f"data:{ct};base64,{base64.b64encode(r.content).decode()}"
+        url = image_url  # 公开 URL 直接传给模型，无需服务器下载
     else:
         url = _image_to_data_url(image_path)
     image_block = {
@@ -127,44 +123,6 @@ def _weather_to_sensor_label(weather_data: dict) -> str:
 
 
 def _describe_image_with_doubao(image_path: str) -> str:
-    """Call Doubao VL to describe the image in ≤30 chars. Returns the raw description string."""
-    import base64
-    from config import conf
-    ext = os.path.splitext(image_path)[1].lower()
-    mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-            ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}.get(ext, "image/jpeg")
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-
-    vl_model = conf().get("doubao_vl_model", "doubao-seed-2-0-mini-260215")
-    api_key = conf().get("ark_api_key", "")
-    base_url = conf().get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
-
-    import requests
-    payload = {
-        "model": vl_model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                    {"type": "text", "text": "请用一句话描述这张图片的主要内容和情感氛围，15字以内"},
-                ],
-            }
-        ],
-        "max_tokens": 32,
-    }
-    resp = requests.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
-
-
-def _describe_image_with_doubao(image_path: str) -> str:
     """Call Doubao VL to create a compact visual memory for follow-up turns."""
     from config import conf
 
@@ -206,23 +164,9 @@ def _describe_image_with_doubao(image_path: str) -> str:
 
 
 def _describe_image_with_doubao_url(image_url: str) -> str:
-    """Download image from URL server-side, then call Doubao VL with base64.
-
-    OSS buckets may restrict access by IP/Referer, so we download the image
-    ourselves (server has the signed URL) and re-encode rather than passing
-    the raw URL to Doubao's download service.
-    """
-    import base64
+    """Pass public OSS URL directly to Doubao VL (no server-side download)."""
     import requests
     from config import conf
-
-    # Download the image from the URL
-    r = requests.get(image_url, timeout=20)
-    r.raise_for_status()
-    image_bytes = r.content
-    content_type = r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:{content_type};base64,{b64}"
 
     vl_model = conf().get("doubao_vl_model", "doubao-seed-2-0-mini-260215")
     api_key = conf().get("ark_api_key", "")
@@ -243,7 +187,7 @@ def _describe_image_with_doubao_url(image_url: str) -> str:
             {
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "image_url", "image_url": {"url": image_url}},
                     {"type": "text", "text": prompt},
                 ],
             }
