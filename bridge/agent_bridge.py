@@ -51,13 +51,14 @@ def _image_to_data_url(image_path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def _build_direct_image_message(query: str, image_path: str) -> List[dict]:
+def _build_direct_image_message(query: str, image_path: str = None, image_url: str = None) -> List[dict]:
     from config import conf
 
     detail = conf().get("image_agent_openai_detail", "auto")
+    url = image_url if image_url else _image_to_data_url(image_path)
     image_block = {
         "type": "image_url",
-        "image_url": {"url": _image_to_data_url(image_path)},
+        "image_url": {"url": url},
     }
     if detail in {"auto", "low", "high"}:
         image_block["image_url"]["detail"] = detail
@@ -181,6 +182,47 @@ def _describe_image_with_doubao(image_path: str) -> str:
                 "role": "user",
                 "content": [
                     {"type": "image_url", "image_url": {"url": _image_to_data_url(image_path)}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        "max_tokens": conf().get("image_agent_memory_max_tokens", 280),
+    }
+    resp = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+def _describe_image_with_doubao_url(image_url: str) -> str:
+    """Call Doubao VL with a remote URL to create a compact visual memory."""
+    from config import conf
+
+    vl_model = conf().get("doubao_vl_model", "doubao-seed-2-0-mini-260215")
+    api_key = conf().get("ark_api_key", "")
+    base_url = conf().get("ark_base_url", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
+    prompt = conf().get(
+        "image_agent_memory_prompt",
+        (
+            "请为这张图片生成一段可用于后续对话追问的精准视觉记忆。"
+            "用中文，120-220字，尽量客观具体。覆盖：主体和场景、空间布局、"
+            "装潢/材质/色彩/灯光、人物数量和动作、可见文字或招牌、桌面物品、"
+            "氛围，以及不确定但可能相关的细节。不要寒暄，不要编造看不清的内容。"
+        ),
+    )
+
+    import requests
+    payload = {
+        "model": vl_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
                     {"type": "text", "text": prompt},
                 ],
             }
@@ -598,13 +640,37 @@ class AgentBridge:
             # Image feedback supports two multimodal paths:
             # - doubao_summary: describe via Doubao VL, then pass text to the main model.
             # - openai_direct: pass image_url blocks directly to the main model.
+            image_url_ctx = context.get("image_url") if context else None
             image_path = context.get("image_path") if context else None
-            if image_path and os.path.exists(image_path):
+            if image_url_ctx:
+                # OSS/CDN URL path: no file I/O, pass URL directly
+                from config import conf
+                image_mode = str(conf().get("image_agent_multimodal_mode", "doubao_summary") or "doubao_summary").lower()
+                if image_mode in {"openai", "openai_direct", "direct", "gpt4o", "gpt-4o",
+                                  "both", "openai_with_summary", "direct_with_summary"}:
+                    user_message = _build_direct_image_message(query, image_url=image_url_ctx)
+                    try:
+                        desc = _describe_image_with_doubao_url(image_url_ctx)
+                        logger.info(f"[AgentBridge] Doubao image memory (url): {desc}")
+                        user_message.insert(0, {"type": "text", "text": f"[image memory: {desc}]"})
+                    except Exception as e:
+                        logger.warning(f"[AgentBridge] Doubao image memory failed: {e}, using direct image input only")
+                    logger.info("[AgentBridge] Image feedback via OSS URL (no base64)")
+                else:
+                    try:
+                        desc = _describe_image_with_doubao_url(image_url_ctx)
+                        logger.info(f"[AgentBridge] Doubao image memory (url): {desc}")
+                        wrapped = f"[{desc}]"
+                        user_message = f"{query}\n{wrapped}".strip() if query and query.strip() else wrapped
+                    except Exception as e:
+                        logger.warning(f"[AgentBridge] Doubao image memory failed: {e}, falling back to text-only")
+                        user_message = query or ""
+            elif image_path and os.path.exists(image_path):
                 from config import conf
 
                 image_mode = str(conf().get("image_agent_multimodal_mode", "doubao_summary") or "doubao_summary").lower()
                 if image_mode in {"openai", "openai_direct", "direct", "gpt4o", "gpt-4o"}:
-                    user_message = _build_direct_image_message(query, image_path)
+                    user_message = _build_direct_image_message(query, image_path=image_path)
                     try:
                         desc = _describe_image_with_doubao(image_path)
                         logger.info(f"[AgentBridge] Doubao image memory: {desc}")
@@ -613,7 +679,7 @@ class AgentBridge:
                         logger.warning(f"[AgentBridge] Doubao image memory failed: {e}, using direct image input only")
                     logger.info("[AgentBridge] Image feedback using direct OpenAI-compatible image input")
                 elif image_mode in {"both", "openai_with_summary", "direct_with_summary"}:
-                    user_message = _build_direct_image_message(query, image_path)
+                    user_message = _build_direct_image_message(query, image_path=image_path)
                     try:
                         desc = _describe_image_with_doubao(image_path)
                         logger.info(f"[AgentBridge] Doubao image memory: {desc}")

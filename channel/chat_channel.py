@@ -254,7 +254,12 @@ class ChatChannel(Channel):
                         agent_context = Context(ContextType.TEXT, prompt, dict(context.kwargs))
                         agent_context["origin_ctype"] = ContextType.IMAGE
                         agent_context["image_feedback_mode"] = True
-                        agent_context["image_path"] = image_path  # passed to _build_image_content
+                        # OSS URL 直接透传，否则用本地文件路径
+                        oss_url = context.get("image_url", "")
+                        if oss_url:
+                            agent_context["image_url"] = oss_url
+                        else:
+                            agent_context["image_path"] = image_path
                         vision_reply = super().build_reply_content(agent_context.content, agent_context)
                     else:
                         vision_reply = Bridge().fetch_reply_content(image_path, context)
@@ -299,6 +304,17 @@ class ChatChannel(Channel):
             "reset_opening_message",
             "重置好啦✨我是满仓，要先吃点小饼干吗？"
         )
+
+        # 把 opening 写入新 session 的历史，让模型能看到这句开场白
+        if session_id:
+            try:
+                bridge = Bridge()
+                chat_bot = bridge.get_bot("chat")
+                if hasattr(chat_bot, "sessions"):
+                    chat_bot.sessions.session_reply(opening, session_id)
+            except Exception as e:
+                logger.warning(f"[chat_channel] failed to add opening to session: {e}")
+
         logger.info(f"[chat_channel] reset command handled, session_id={session_id}")
         return Reply(ReplyType.TEXT, opening)
 

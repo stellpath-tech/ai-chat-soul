@@ -438,6 +438,7 @@ class WebChannel(ChatChannel):
                     
             prompt = json_data.get('message', '')
             image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
+            image_url_input = json_data.get('image_url', '')  # OSS/CDN URL（可选，与 image 二选一）
             image_type = json_data.get('image_type', 'jpeg')  # 图片格式，默认 jpeg
             use_sse = json_data.get('stream', True)
             timezone     = json_data.get('timezone')
@@ -452,10 +453,39 @@ class WebChannel(ChatChannel):
             if use_sse:
                 self.sse_queues[request_id] = Queue()
 
-            msg = WebMessage(self._generate_msg_id(), prompt or image_b64)
+            msg = WebMessage(self._generate_msg_id(), prompt or image_b64 or image_url_input)
             msg.from_user_id = session_id
 
-            # ---------- 图片消息 ----------
+            # ---------- 图片消息（OSS URL）----------
+            if image_url_input and not image_b64:
+                context = self._compose_context(ContextType.IMAGE, image_url_input, msg=msg, isgroup=False)
+                if context is None:
+                    if request_id in self.sse_queues:
+                        del self.sse_queues[request_id]
+                    return json.dumps({"status": "error", "message": "Message was filtered"})
+
+                context["image_url"] = image_url_input
+                if prompt:
+                    context["image_caption"] = prompt
+
+                context["session_id"] = session_id
+                context["receiver"] = session_id
+                context["request_id"] = request_id
+                context["device_id"] = device_id
+                context["source"] = source
+                context["timezone"] = timezone
+                context["sensor_label"] = sensor_label
+
+                if use_sse:
+                    context["on_event"] = self._make_sse_callback(request_id)
+
+                if source == "DEVICE" and device_id:
+                    self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
+
+                threading.Thread(target=self.produce, args=(context,)).start()
+                return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
+
+            # ---------- 图片消息（base64）----------
             if image_b64:
                 image_path = self._save_image_from_b64(image_b64, image_type)
                 if not image_path:
