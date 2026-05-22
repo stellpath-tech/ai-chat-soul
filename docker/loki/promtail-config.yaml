@@ -1,0 +1,72 @@
+# 部署位置：亚马逊服务器（与应用同机）
+# 修改 clients.url 中的 <DOMESTIC_LOKI_IP> 为国内服务器公网 IP
+# 修改 __path__ 为实际的日志文件绝对路径
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/promtail-positions.yaml
+
+clients:
+  - url: http://<DOMESTIC_LOKI_IP>:3100/loki/api/v1/push
+    backoff_config:
+      min_period: 500ms
+      max_period: 5m
+      max_retries: 10
+
+scrape_configs:
+  # 结构化业务事件日志（JSON）
+  - job_name: ai-chat-soul-events
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ai-chat-soul
+          log_type: event
+          host: aws-prod
+          __path__: /home/<USER>/ai-chat-soul/events.log
+    pipeline_stages:
+      - json:
+          expressions:
+            event:
+            request_id:
+            user_id:
+            user_group:
+            source:
+            status:
+            error_type:
+            tool:
+            latency_ms:
+      # 把高基数字段（如 request_id、user_id）保留为结构化字段而不是 label，
+      # 避免 Loki 索引膨胀。低基数字段才提升为 label。
+      - labels:
+          event:
+          source:
+          status:
+          error_type:
+          tool:
+      - timestamp:
+          source: ts
+          format: Unix
+
+  # 应用原始运行日志（plaintext，兜底用）
+  - job_name: ai-chat-soul-runlog
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ai-chat-soul
+          log_type: runlog
+          host: aws-prod
+          __path__: /home/<USER>/ai-chat-soul/run.log
+    pipeline_stages:
+      # 解析 [LEVEL][ts][file:line] - message 格式，提取 level 作为 label
+      - regex:
+          expression: '^\[(?P<level>[A-Z]+)\]\[(?P<timestamp>[\d\-: ]+)\]\[[^\]]+\]\s-\s(?P<message>.*)$'
+      - labels:
+          level:
+      - timestamp:
+          source: timestamp
+          format: "2006-01-02 15:04:05"

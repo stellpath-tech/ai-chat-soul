@@ -1,0 +1,18 @@
+# 部署位置：亚马逊服务器（与应用同机）
+# 把 ./logs 改成 ai-chat-soul 实际日志目录的绝对路径
+version: "3.8"
+
+services:
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yaml
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
+      - promtail-positions:/tmp
+      # 把应用日志目录挂进来；路径与 promtail-config.yaml 里 __path__ 保持一致
+      - /home/USER/ai-chat-soul:/home/USER/ai-chat-soul:ro
+
+volumes:
+  promtail-positions:

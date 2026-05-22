@@ -1,0 +1,18 @@
+# 部署位置：国内服务器（与 Prometheus/Grafana 同机）
+# 启动：docker compose up -d
+version: "3.8"
+
+services:
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+
+volumes:
+  loki-data:

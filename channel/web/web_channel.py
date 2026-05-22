@@ -21,6 +21,15 @@ import logging
 import channel.web.database as db
 from channel.web.metrics import MetricsHandler, metrics_processor, USER_AUTH_TOTAL
 
+try:
+    from common import event_log
+except Exception:
+    class _NoopEventLog:
+        @staticmethod
+        def log(*args, **kwargs):
+            pass
+    event_log = _NoopEventLog()
+
 
 class WebMessage(ChatMessage):
     def __init__(
@@ -93,6 +102,22 @@ class WebChannel(ChatChannel):
                 logger.error("No request_id found in context, cannot send message")
                 return
 
+            _start_time = context.get("llm_start_time")
+            _latency_ms = int((time.time() - _start_time) * 1000) if _start_time else None
+            event_log.log(
+                "llm_done",
+                request_id=request_id,
+                user_id=context.get("user_id", -1),
+                user_group=context.get("user_group", -1),
+                phone_number=context.get("phone_number", ""),
+                session_id=context.get("session_id", ""),
+                device_id=context.get("device_id", ""),
+                source=context.get("source", ""),
+                reply_type=str(reply.type) if reply.type else None,
+                reply_content=reply.content if reply.content is not None else "",
+                latency_ms=_latency_ms,
+            )
+
             session_id = self.request_to_session.get(request_id)
             if not session_id:
                 logger.error(f"No session_id found for request {request_id}")
@@ -132,8 +157,34 @@ class WebChannel(ChatChannel):
         except Exception as e:
             logger.error(f"Error in send method: {e}")
 
-    def _make_sse_callback(self, request_id: str):
+    def _produce_with_logging(self, context):
+        """Wrap produce() so unexpected exceptions get logged as llm_error events."""
+        request_id = context.get("request_id", "")
+        start_time = context.get("llm_start_time")
+        try:
+            self.produce(context)
+        except Exception as e:
+            latency_ms = int((time.time() - start_time) * 1000) if start_time else None
+            event_log.log(
+                "llm_error",
+                request_id=request_id,
+                user_id=context.get("user_id", -1),
+                user_group=context.get("user_group", -1),
+                phone_number=context.get("phone_number", ""),
+                session_id=context.get("session_id", ""),
+                device_id=context.get("device_id", ""),
+                source=context.get("source", ""),
+                error_type=type(e).__name__,
+                error_msg=str(e),
+                latency_ms=latency_ms,
+            )
+            logger.error(f"[WebChannel] produce failed for request {request_id}: {e}")
+            logger.exception(e)
+
+    def _make_sse_callback(self, request_id: str, log_ctx: dict = None):
         """Build an on_event callback that pushes agent stream events into the SSE queue."""
+        log_ctx = log_ctx or {}
+
         def on_event(event: dict):
             if request_id not in self.sse_queues:
                 return
@@ -155,18 +206,31 @@ class WebChannel(ChatChannel):
                 tool_name = data.get("tool_name", "tool")
                 status = data.get("status", "success")
                 result = data.get("result", "")
+                arguments = data.get("arguments", {})
                 exec_time = data.get("execution_time", 0)
                 # Truncate long results to avoid huge SSE payloads
                 result_str = str(result)
                 if len(result_str) > 2000:
-                    result_str = result_str[:2000] + "…"
+                    sse_result = result_str[:2000] + "…"
+                else:
+                    sse_result = result_str
                 q.put({
                     "type": "tool_end",
                     "tool": tool_name,
                     "status": status,
-                    "result": result_str,
+                    "result": sse_result,
                     "execution_time": round(exec_time, 2)
                 })
+                event_log.log(
+                    "tool_call",
+                    request_id=request_id,
+                    tool=tool_name,
+                    status=status,
+                    arguments=arguments,
+                    result=result_str,
+                    latency_ms=int(exec_time * 1000),
+                    **log_ctx,
+                )
 
         return on_event
 
@@ -421,10 +485,16 @@ class WebChannel(ChatChannel):
             
             # 优先使用 token 解析出的 user_id 作为 session
             session_id = None
+            user_id = -1
+            user_group = -1
+            phone_number = ""
             if auth_token:
                 user = db.get_user_by_token(auth_token)
                 if user:
                     session_id = f"user_{user['id']}"
+                    user_id = user['id']
+                    user_group = user.get('user_group', -1)
+                    phone_number = user.get('phone_number', '')
                 else:
                     web.ctx.status = '401 Unauthorized'
                     return json.dumps({"status": "error", "message": "unauthorized", "code": 401})
@@ -482,14 +552,37 @@ class WebChannel(ChatChannel):
                 context["source"] = source
                 context["timezone"] = timezone
                 context["sensor_label"] = sensor_label
+                context["llm_start_time"] = time.time()
+                context["user_id"] = user_id
+                context["user_group"] = user_group
+                context["phone_number"] = phone_number
+
+                _log_ctx = {
+                    "user_id": user_id,
+                    "user_group": user_group,
+                    "phone_number": phone_number,
+                    "session_id": session_id,
+                    "device_id": device_id,
+                    "source": source,
+                }
+                event_log.log(
+                    "llm_start",
+                    request_id=request_id,
+                    message_type="image_url",
+                    image_url=image_url_input,
+                    image_caption=prompt,
+                    timezone=timezone,
+                    sensor_label=sensor_label,
+                    **_log_ctx,
+                )
 
                 if use_sse:
-                    context["on_event"] = self._make_sse_callback(request_id)
+                    context["on_event"] = self._make_sse_callback(request_id, _log_ctx)
 
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
 
-                threading.Thread(target=self.produce, args=(context,)).start()
+                threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
 
             # ---------- 图片消息（base64）----------
@@ -519,15 +612,38 @@ class WebChannel(ChatChannel):
                 context["source"] = source
                 context["timezone"]     = timezone
                 context["sensor_label"] = sensor_label
+                context["llm_start_time"] = time.time()
+                context["user_id"] = user_id
+                context["user_group"] = user_group
+                context["phone_number"] = phone_number
+
+                _log_ctx = {
+                    "user_id": user_id,
+                    "user_group": user_group,
+                    "phone_number": phone_number,
+                    "session_id": session_id,
+                    "device_id": device_id,
+                    "source": source,
+                }
+                event_log.log(
+                    "llm_start",
+                    request_id=request_id,
+                    message_type="image_b64",
+                    image_path=image_path,
+                    image_caption=prompt,
+                    timezone=timezone,
+                    sensor_label=sensor_label,
+                    **_log_ctx,
+                )
 
                 if use_sse:
-                    context["on_event"] = self._make_sse_callback(request_id)
+                    context["on_event"] = self._make_sse_callback(request_id, _log_ctx)
 
 
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
 
-                threading.Thread(target=self.produce, args=(context,)).start()
+                threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
 
             # ---------- 文本消息 ----------
@@ -554,15 +670,37 @@ class WebChannel(ChatChannel):
             context["user_message"] = prompt
             context["timezone"]     = timezone
             context["sensor_label"] = sensor_label
+            context["llm_start_time"] = time.time()
+            context["user_id"] = user_id
+            context["user_group"] = user_group
+            context["phone_number"] = phone_number
+
+            _log_ctx = {
+                "user_id": user_id,
+                "user_group": user_group,
+                "phone_number": phone_number,
+                "session_id": session_id,
+                "device_id": device_id,
+                "source": source,
+            }
+            event_log.log(
+                "llm_start",
+                request_id=request_id,
+                message_type="text",
+                message=prompt,
+                timezone=timezone,
+                sensor_label=sensor_label,
+                **_log_ctx,
+            )
 
             if use_sse:
-                context["on_event"] = self._make_sse_callback(request_id)
+                context["on_event"] = self._make_sse_callback(request_id, _log_ctx)
 
             # DEVICE 来源：将用户消息写入聊天记录队列
             if source == "DEVICE" and device_id:
                 self._push_chatlog(device_id, "user", prompt)
 
-            threading.Thread(target=self.produce, args=(context,)).start()
+            threading.Thread(target=self._produce_with_logging, args=(context,)).start()
 
             return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
 
@@ -904,24 +1042,34 @@ class AuthRegisterHandler:
     def POST(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
         web.header('Access-Control-Allow-Origin', '*')
+        phone_number = None
+        invite_code = None
         try:
             data = json.loads(web.data())
             phone_number = data.get('phoneNumber')
             invite_code = data.get('inviteCode')
             if not phone_number or not invite_code:
                 USER_AUTH_TOTAL.labels(type="missing_params").inc()
+                event_log.log("auth_fail", reason="missing_params",
+                              phone_number=phone_number or "", invite_code=invite_code or "")
                 return json.dumps({"success": False, "message": "Missing phoneNumber or inviteCode", "data": None}, ensure_ascii=False)
-            
+
             success, msg, token, action_type = db.register_or_login(phone_number, invite_code)
-            
+
             USER_AUTH_TOTAL.labels(type=action_type).inc()
-            
+
             if not success:
+                event_log.log("auth_fail", reason=action_type, message=msg,
+                              phone_number=phone_number, invite_code=invite_code)
                 return json.dumps({"success": False, "message": msg, "data": None}, ensure_ascii=False)
-            
+
+            event_log.log("auth_done", action=action_type,
+                          phone_number=phone_number, invite_code=invite_code)
             return json.dumps({"success": True, "message": "Success", "data": {"token": token}}, ensure_ascii=False)
         except Exception as e:
             USER_AUTH_TOTAL.labels(type="unknown_error").inc()
+            event_log.log("auth_fail", reason="unknown_error", error_type=type(e).__name__, error_msg=str(e),
+                          phone_number=phone_number or "", invite_code=invite_code or "")
             logger.error(f"AuthRegisterHandler error: {e}")
             return json.dumps({"success": False, "message": "Server error", "data": None})
 
