@@ -821,6 +821,7 @@ class WebChannel(ChatChannel):
             '/api/auth/register', 'AuthRegisterHandler',
             '/api/invite_code', 'InviteCodeHandler',
             '/api/user_behavior', 'UserBehaviorHandler',
+            '/api/client/event', 'ClientEventHandler',
             '/api/weather', 'WeatherHandler',
             '/metrics', 'MetricsHandler',
             '/assets/(.*)', 'AssetsHandler',
@@ -1111,12 +1112,81 @@ class UserBehaviorHandler:
             messages = data.get('messages', [])
             if not isinstance(messages, list):
                 return json.dumps({"success": False, "message": "Invalid format", "data": None}, ensure_ascii=False)
-            
+
             db.log_behaviors(messages)
             return json.dumps({"success": True, "message": "Success", "data": None}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"UserBehaviorHandler error: {e}")
             return json.dumps({"success": False, "message": "Server error", "data": None})
+
+
+class ClientEventHandler:
+    """
+    POST /api/client/event
+    客户端上报事件（崩溃、HTTP 错误、业务异常、自定义埋点等）。
+    服务端不约束 payload 结构，原样写入 events.log，由 Loki 侧解析查询。
+    """
+    MAX_BATCH = 50
+    MAX_EVENT_BYTES = 16 * 1024
+    MAX_TOTAL_BYTES = 1 * 1024 * 1024  # 单次请求总上限 1MB
+
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            raw = web.data() or b""
+            if len(raw) > self.MAX_TOTAL_BYTES:
+                return json.dumps({"success": False, "message": "payload too large", "accepted": 0})
+
+            data = json.loads(raw)
+            events = data.get('events', [])
+            if not isinstance(events, list):
+                return json.dumps({"success": False, "message": "events must be a list", "accepted": 0})
+            if len(events) > self.MAX_BATCH:
+                return json.dumps({"success": False, "message": f"batch exceeds {self.MAX_BATCH}", "accepted": 0})
+
+            # 服务端补齐的上下文
+            auth_token = web.ctx.env.get("HTTP_X_AUTH_TOKEN", "").strip()
+            server_user_id = -1
+            server_phone = ""
+            if auth_token:
+                u = db.get_user_by_token(auth_token)
+                if u:
+                    server_user_id = u['id']
+                    server_phone = u.get('phone_number', '')
+
+            client_ip = (
+                web.ctx.env.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
+                or web.ctx.env.get('HTTP_X_REAL_IP', '').strip()
+                or web.ctx.env.get('REMOTE_ADDR', '')
+            )
+
+            accepted = 0
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                # 单条大小检查
+                try:
+                    if len(json.dumps(ev, ensure_ascii=False)) > self.MAX_EVENT_BYTES:
+                        ev = {"_truncated": True, "subtype": ev.get("subtype", "unknown"),
+                              "error_msg": str(ev.get("error_msg", ""))[:1000]}
+                except Exception:
+                    continue
+
+                merged = dict(ev)
+                # 服务端上下文（覆盖客户端伪造）
+                merged["server_user_id"] = server_user_id
+                merged["server_phone"] = server_phone
+                merged["client_ip"] = client_ip
+                merged["server_ts"] = time.time()
+
+                event_log.log("client_event", **merged)
+                accepted += 1
+
+            return json.dumps({"success": True, "accepted": accepted})
+        except Exception as e:
+            logger.error(f"ClientEventHandler error: {e}")
+            return json.dumps({"success": False, "message": "Server error", "accepted": 0})
 
 
 class AssetsHandler:
