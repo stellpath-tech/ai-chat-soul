@@ -17,6 +17,16 @@ from agent.utils.hehe_harness import (
 )
 from common.log import logger
 
+try:
+    from common import event_log
+except Exception:
+    class _NoopEventLog:
+        @staticmethod
+        def log(*args, **kwargs): pass
+        @staticmethod
+        def log_exception(*args, **kwargs): pass
+    event_log = _NoopEventLog()
+
 
 class AgentStreamExecutor:
     """
@@ -743,8 +753,21 @@ class AgentStreamExecutor:
             else:
                 if retry_count >= max_retries:
                     logger.error(f"❌ LLM API error after {max_retries} retries: {e}")
+                    event_log.log_exception(
+                        "llm_call_failed",
+                        e,
+                        reason="retries_exhausted",
+                        retry_count=retry_count,
+                        model=getattr(self.model, "model", ""),
+                    )
                 else:
                     logger.error(f"❌ LLM call error (non-retryable): {e}")
+                    event_log.log_exception(
+                        "llm_call_failed",
+                        e,
+                        reason="non_retryable",
+                        model=getattr(self.model, "model", ""),
+                    )
                 raise
 
         # Parse tool calls
@@ -940,7 +963,13 @@ class AgentStreamExecutor:
             return result_dict
 
         except Exception as e:
-            logger.error(f"Tool execution error: {e}")
+            logger.exception(f"Tool execution error: {e}")
+            event_log.log_exception(
+                "tool_exception",
+                e,
+                tool=tool_name,
+                arguments=arguments,
+            )
             error_result = {
                 "status": "error",
                 "result": str(e),
@@ -948,7 +977,7 @@ class AgentStreamExecutor:
             }
             # Record failure
             self._record_tool_result(tool_name, arguments, False)
-            
+
             self._emit_event("tool_execution_end", {
                 "tool_call_id": tool_id,
                 "tool_name": tool_name,

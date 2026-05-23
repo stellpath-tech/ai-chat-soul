@@ -70,8 +70,16 @@ class ChannelManager:
         try:
             channel.startup()
         except Exception as e:
-            logger.error(f"[ChannelManager] Channel startup error: {e}")
-            logger.exception(e)
+            logger.exception(f"[ChannelManager] Channel startup error: {e}")
+            try:
+                from common import event_log
+                event_log.log_exception(
+                    "channel_startup_failed",
+                    e,
+                    channel_type=getattr(channel, "channel_type", "unknown"),
+                )
+            except Exception:
+                pass
 
     def stop(self):
         """
@@ -171,6 +179,13 @@ def run():
     try:
         # load config
         load_config()
+        # Install global excepthooks so uncaught exceptions (main + worker threads)
+        # land in events.log instead of being swallowed.
+        try:
+            from common import event_log
+            event_log.install_excepthooks()
+        except Exception as _hook_err:
+            logger.warning(f"install_excepthooks failed: {_hook_err}")
         # ctrl + c
         sigterm_handler_wrap(signal.SIGINT)
         # kill signal
@@ -191,8 +206,7 @@ def run():
         while True:
             time.sleep(1)
     except Exception as e:
-        logger.error("App startup failed!")
-        logger.exception(e)
+        logger.exception("App startup failed!")
 
 
 if __name__ == "__main__":

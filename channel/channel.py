@@ -68,7 +68,19 @@ class Channel(object):
                     clear_history=False
                 )
             except Exception as e:
-                logger.error(f"[Channel] Agent mode failed, fallback to normal mode: {e}")
+                logger.exception(f"[Channel] Agent mode failed, fallback to normal mode: {e}")
+                # Silent degradation — agent mode failed but we kept serving via
+                # the non-agent bot. Without this event the reply succeeds but
+                # nobody knows the agent broke.
+                try:
+                    from common import event_log
+                    event_log.log_exception(
+                        "agent_fallback",
+                        e,
+                        channel_type=self.channel_type,
+                    )
+                except Exception:
+                    pass
                 # Fallback to normal mode if agent fails
                 return Bridge().fetch_reply_content(query, context)
         else:
