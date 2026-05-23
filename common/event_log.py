@@ -56,11 +56,16 @@ def unbind():
 
 
 def log(event: str, **fields):
-    """Write one structured JSON line to events.log. Never raises."""
+    """Write one structured JSON line to events.log. Never raises.
+
+    Always tags `level` (default "info") so Promtail can promote it to a label
+    and queries like {level="error"} work without parsing JSON. Callers can
+    override by passing level="warn" etc.
+    """
     if _logger is None:
         return
     try:
-        merged = {**_current_context(), **fields}
+        merged = {"level": "info", **_current_context(), **fields}
         record = {"event": event, "ts": time.time(), **merged}
         _logger.info(json.dumps(record, ensure_ascii=False, default=str))
     except Exception:
@@ -68,11 +73,13 @@ def log(event: str, **fields):
 
 
 def log_exception(event: str, exc: BaseException, **fields):
-    """Log an exception event with auto-filled error_type/error_msg/stack_trace."""
+    """Log an exception event with auto-filled error_type/error_msg/stack_trace.
+    Always tagged level="error" so {level="error"} catches every exception."""
     try:
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     except Exception:
         tb = ""
+    fields.setdefault("level", "error")
     log(
         event,
         error_type=type(exc).__name__,
@@ -121,6 +128,7 @@ def install_excepthooks():
                 if exc is None:
                     log(
                         "unhandled_exception",
+                        level="error",
                         source="threading.excepthook",
                         thread_name=thread_name,
                         error_type=getattr(args.exc_type, "__name__", "Unknown"),

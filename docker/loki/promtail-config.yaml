@@ -1,6 +1,9 @@
 # 部署位置：亚马逊服务器（与应用同机）
 # 修改 clients.url 中的 <DOMESTIC_LOKI_IP> 为国内服务器公网 IP
 # 修改 __path__ 为实际的日志文件绝对路径
+#
+# 必须走 HTTPS 反代（国内 VM 上 nginx :3101 → Loki :3100），不要直推 :3100。
+# 跨境裸 HTTP push 会被 DPI 掐大 body，详见 docker/loki/README.md。
 
 server:
   http_listen_port: 9080
@@ -10,11 +13,15 @@ positions:
   filename: /tmp/promtail-positions.yaml
 
 clients:
-  - url: http://<DOMESTIC_LOKI_IP>:3100/loki/api/v1/push
+  - url: https://<DOMESTIC_LOKI_IP>:3101/loki/api/v1/push
+    tls_config:
+      insecure_skip_verify: true   # 国内 VM 用自签证书
+    batchwait: 2s
+    timeout: 30s
     backoff_config:
       min_period: 500ms
       max_period: 5m
-      max_retries: 10
+      max_retries: 20
 
 scrape_configs:
   # 结构化业务事件日志（JSON）
@@ -31,6 +38,7 @@ scrape_configs:
       - json:
           expressions:
             event:
+            level:
             request_id:
             user_id:
             user_group:
@@ -40,9 +48,11 @@ scrape_configs:
             tool:
             latency_ms:
       # 把高基数字段（如 request_id、user_id）保留为结构化字段而不是 label，
-      # 避免 Loki 索引膨胀。低基数字段才提升为 label。
+      # 避免 Loki 索引膨胀。低基数字段才提升为 label。level 是 info/warn/error
+      # 三档低基数，提升为 label 后可以直接 {level="error"} 查所有报错。
       - labels:
           event:
+          level:
           source:
           status:
           error_type:
@@ -65,6 +75,10 @@ scrape_configs:
       # 解析 [LEVEL][ts][file:line] - message 格式，提取 level 作为 label
       - regex:
           expression: '^\[(?P<level>[A-Z]+)\]\[(?P<timestamp>[\d\-: ]+)\]\[[^\]]+\]\s-\s(?P<message>.*)$'
+      # 转小写，与 events.log 的 level 一致，{level="error"} 跨两个日志源统一查询
+      - template:
+          source: level
+          template: '{{ ToLower .Value }}'
       - labels:
           level:
       - timestamp:
