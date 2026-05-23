@@ -155,18 +155,30 @@ class WebChannel(ChatChannel):
                 logger.warning(f"No response queue found for session {session_id}, response dropped")
 
         except Exception as e:
-            logger.error(f"Error in send method: {e}")
+            logger.exception(f"Error in send method: {e}")
+            # Without this, a failure to push the reply back leaves the client
+            # hanging and there is no llm_done in the logs to explain why.
+            event_log.log_exception(
+                "web_send_failed",
+                e,
+                request_id=context.get("request_id", "") if context else "",
+                user_id=context.get("user_id", -1) if context else -1,
+                phone_number=context.get("phone_number", "") if context else "",
+                session_id=context.get("session_id", "") if context else "",
+                reply_type=str(reply.type) if reply and reply.type else "",
+            )
 
     def _produce_with_logging(self, context):
-        """Wrap produce() so unexpected exceptions get logged as llm_error events."""
+        """Wrap produce() — this only catches enqueue failures.
+        Real LLM/tool/bridge errors are logged downstream in _handle and
+        the agent stack via llm_call_failed / agent_failed / tool_exception."""
         request_id = context.get("request_id", "")
-        start_time = context.get("llm_start_time")
         try:
             self.produce(context)
         except Exception as e:
-            latency_ms = int((time.time() - start_time) * 1000) if start_time else None
-            event_log.log(
-                "llm_error",
+            event_log.log_exception(
+                "produce_failed",
+                e,
                 request_id=request_id,
                 user_id=context.get("user_id", -1),
                 user_group=context.get("user_group", -1),
@@ -174,12 +186,8 @@ class WebChannel(ChatChannel):
                 session_id=context.get("session_id", ""),
                 device_id=context.get("device_id", ""),
                 source=context.get("source", ""),
-                error_type=type(e).__name__,
-                error_msg=str(e),
-                latency_ms=latency_ms,
             )
-            logger.error(f"[WebChannel] produce failed for request {request_id}: {e}")
-            logger.exception(e)
+            logger.exception(f"[WebChannel] produce failed for request {request_id}: {e}")
 
     def _make_sse_callback(self, request_id: str, log_ctx: dict = None):
         """Build an on_event callback that pushes agent stream events into the SSE queue."""
@@ -247,6 +255,12 @@ class WebChannel(ChatChannel):
                 return f.name
         except Exception as e:
             logger.error(f"[WebChannel] Failed to decode image: {e}")
+            event_log.log_exception(
+                "image_decode_failed",
+                e,
+                image_type=image_type,
+                b64_len=len(b64_data) if b64_data else 0,
+            )
             return ""
 
     def _push_chatlog(self, device_id: str, role: str, content: str):
@@ -283,6 +297,7 @@ class WebChannel(ChatChannel):
                 logger.info(f"[WebChannel] Loaded {len(data)} device(s) from registry")
         except Exception as e:
             logger.warning(f"[WebChannel] Failed to load device registry: {e}")
+            event_log.log_exception("device_registry_load_failed", e)
 
     def _save_device_registry(self):
         """将设备注册表持久化到磁盘（注册/更新时调用）"""
@@ -294,6 +309,7 @@ class WebChannel(ChatChannel):
                 json.dump(snapshot, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"[WebChannel] Failed to save device registry: {e}")
+            event_log.log_exception("device_registry_save_failed", e)
 
     def register_device(self):
         """POST /api/device/register — 设备上线注册"""
@@ -310,7 +326,12 @@ class WebChannel(ChatChannel):
             logger.info(f"[WebChannel] Device registered: {device_id}")
             return json.dumps({"success": True, "message": "ok", "data": None})
         except Exception as e:
-            logger.error(f"[WebChannel] register_device error: {e}")
+            logger.exception(f"[WebChannel] register_device error: {e}")
+            event_log.log_exception(
+                "register_device_failed", e,
+                endpoint="/api/device/register",
+                device_id=locals().get("device_id", "") or "",
+            )
             return json.dumps({"success": False, "message": str(e), "data": None})
 
     def list_devices(self):
@@ -323,7 +344,8 @@ class WebChannel(ChatChannel):
                 ]
             return json.dumps({"success": True, "message": "ok", "data": devices})
         except Exception as e:
-            logger.error(f"[WebChannel] list_devices error: {e}")
+            logger.exception(f"[WebChannel] list_devices error: {e}")
+            event_log.log_exception("list_devices_failed", e, endpoint="/api/device")
             return json.dumps({"success": False, "message": str(e), "data": []})
 
     def _validate_pet_event(self, raw) -> tuple:
@@ -398,7 +420,12 @@ class WebChannel(ChatChannel):
             logger.warning("[WebChannel] pet/event/send rejected: invalid JSON body")
             return json.dumps({"success": False, "message": "invalid JSON body", "data": None})
         except Exception as e:
-            logger.error(f"[WebChannel] send_pet_events error: {e}")
+            logger.exception(f"[WebChannel] send_pet_events error: {e}")
+            event_log.log_exception(
+                "send_pet_events_failed", e,
+                endpoint="/api/pet/event/send",
+                device_id=locals().get("device_id", "") or "",
+            )
             return json.dumps({"success": False, "message": str(e), "data": None})
 
     def poll_pet_events(self):
@@ -441,7 +468,12 @@ class WebChannel(ChatChannel):
                 )
             return json.dumps({"success": True, "message": "ok", "data": out}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"[WebChannel] poll_pet_events error: {e}")
+            logger.exception(f"[WebChannel] poll_pet_events error: {e}")
+            event_log.log_exception(
+                "poll_pet_events_failed", e,
+                endpoint="/api/pet/event/poll",
+                device_id=locals().get("device_id", "") or "",
+            )
             return json.dumps({"success": False, "message": str(e), "data": []})
 
     def pull_chatlog(self):
@@ -460,7 +492,12 @@ class WebChannel(ChatChannel):
                         messages.append(q.popleft())
             return json.dumps({"success": True, "message": "ok", "data": {"messages": messages}}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"[WebChannel] pull_chatlog error: {e}")
+            logger.exception(f"[WebChannel] pull_chatlog error: {e}")
+            event_log.log_exception(
+                "pull_chatlog_failed", e,
+                endpoint="/api/chatlog/pull",
+                device_id=locals().get("device_id", "") or "",
+            )
             return json.dumps({"success": False, "message": str(e), "data": {"messages": []}})
 
     def post_message(self):
@@ -705,7 +742,19 @@ class WebChannel(ChatChannel):
             return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
 
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
+            logger.exception(f"Error processing message: {e}")
+            # Failure here means the HTTP entry blew up before producing — there
+            # may not even be a request_id yet, but log whatever context we have.
+            event_log.log_exception(
+                "post_message_failed",
+                e,
+                endpoint="/message",
+                request_id=locals().get("request_id", "") or "",
+                user_id=locals().get("user_id", -1),
+                phone_number=locals().get("phone_number", "") or "",
+                session_id=locals().get("session_id", "") or "",
+                source=locals().get("source", "") or "",
+            )
             return json.dumps({"status": "error", "message": str(e)})
 
     def stream_response(self, request_id: str):
@@ -713,13 +762,25 @@ class WebChannel(ChatChannel):
         SSE generator for a given request_id.
         Yields UTF-8 encoded bytes to avoid WSGI Latin-1 mangling.
         """
+        # Stream lifecycle gets one open + one close event so we can spot:
+        # invalid request_id (frontend asking for something we never created),
+        # timeout (5min elapsed without llm_done), disconnect (client gave up).
         if request_id not in self.sse_queues:
+            event_log.log(
+                "stream_open",
+                request_id=request_id,
+                outcome="invalid_request_id",
+                endpoint="/stream",
+            )
             yield b"data: {\"type\": \"error\", \"message\": \"invalid request_id\"}\n\n"
             return
 
+        event_log.log("stream_open", request_id=request_id, endpoint="/stream")
+        opened_at = time.time()
         q = self.sse_queues[request_id]
         timeout = 300  # 5 minutes max
-        deadline = time.time() + timeout
+        deadline = opened_at + timeout
+        outcome = "unknown"
 
         try:
             while time.time() < deadline:
@@ -733,9 +794,30 @@ class WebChannel(ChatChannel):
                 yield f"data: {payload}\n\n".encode("utf-8")
 
                 if item.get("type") == "done":
+                    outcome = "done"
                     break
+            else:
+                outcome = "timeout"
+        except GeneratorExit:
+            # Client disconnected mid-stream (closed tab, navigated away, etc.)
+            outcome = "client_disconnect"
+            raise
+        except Exception as e:
+            outcome = "error"
+            event_log.log_exception(
+                "stream_failed", e,
+                request_id=request_id, endpoint="/stream",
+            )
+            raise
         finally:
             self.sse_queues.pop(request_id, None)
+            event_log.log(
+                "stream_close",
+                request_id=request_id,
+                endpoint="/stream",
+                outcome=outcome,
+                duration_ms=int((time.time() - opened_at) * 1000),
+            )
 
     def poll_response(self):
         """
@@ -745,8 +827,15 @@ class WebChannel(ChatChannel):
             data = web.data()
             json_data = json.loads(data)
             session_id = json_data.get('session_id')
-            
+
             if not session_id or session_id not in self.session_queues:
+                # High-frequency endpoint — only log the failure case (stale
+                # session_id), not every empty poll. Empty polls are expected.
+                event_log.log(
+                    "poll_invalid_session",
+                    endpoint="/poll",
+                    session_id=session_id or "",
+                )
                 return json.dumps({"status": "error", "message": "Invalid session ID"})
             
             # 尝试从队列获取响应，不等待
@@ -768,7 +857,12 @@ class WebChannel(ChatChannel):
                 return json.dumps({"status": "success", "has_content": False})
                 
         except Exception as e:
-            logger.error(f"Error polling response: {e}")
+            logger.exception(f"Error polling response: {e}")
+            event_log.log_exception(
+                "poll_response_failed", e,
+                endpoint="/poll",
+                session_id=locals().get("session_id", "") or "",
+            )
             return json.dumps({"status": "error", "message": str(e)})
 
     def chat_page(self):
@@ -853,6 +947,7 @@ class WebChannel(ChatChannel):
                 logger.info("[WebChannel] HTTP server stopped")
             except Exception as e:
                 logger.warning(f"[WebChannel] Error stopping HTTP server: {e}")
+                event_log.log_exception("http_server_stop_failed", e)
             self._http_server = None
 
 
@@ -918,7 +1013,8 @@ class ConfigHandler:
                 "agent_max_steps": local_config.get("agent_max_steps", ""),
             })
         except Exception as e:
-            logger.error(f"Error getting config: {e}")
+            logger.exception(f"Error getting config: {e}")
+            event_log.log_exception("config_get_failed", e, endpoint="/config")
             return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -940,7 +1036,8 @@ class SkillsHandler:
             skills = service.query()
             return json.dumps({"status": "success", "skills": skills}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"[WebChannel] Skills API error: {e}")
+            logger.exception(f"[WebChannel] Skills API error: {e}")
+            event_log.log_exception("skills_api_failed", e, endpoint="/api/skills")
             return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -955,7 +1052,8 @@ class SchedulerHandler:
             tasks = store.list_tasks()
             return json.dumps({"status": "success", "tasks": tasks}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"[WebChannel] Scheduler API error: {e}")
+            logger.exception(f"[WebChannel] Scheduler API error: {e}")
+            event_log.log_exception("scheduler_api_failed", e, endpoint="/api/scheduler")
             return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -1069,9 +1167,13 @@ class AuthRegisterHandler:
             return json.dumps({"success": True, "message": "Success", "data": {"token": token}}, ensure_ascii=False)
         except Exception as e:
             USER_AUTH_TOTAL.labels(type="unknown_error").inc()
-            event_log.log("auth_fail", reason="unknown_error", error_type=type(e).__name__, error_msg=str(e),
-                          phone_number=phone_number or "", invite_code=invite_code or "")
-            logger.error(f"AuthRegisterHandler error: {e}")
+            logger.exception(f"AuthRegisterHandler error: {e}")
+            event_log.log_exception(
+                "auth_register_failed", e,
+                endpoint="/api/auth/register",
+                phone_number=phone_number or "",
+                invite_code=invite_code or "",
+            )
             return json.dumps({"success": False, "message": "Server error", "data": None})
 
 
@@ -1085,11 +1187,16 @@ class InviteCodeHandler:
             expire_at = data.get('expireAt')
             if not invite_code or not expire_at:
                 return json.dumps({"success": False, "message": "Missing parameters", "data": None}, ensure_ascii=False)
-            
+
             db.create_invite_code(invite_code, expire_at)
             return json.dumps({"success": True, "message": "Success", "data": None}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"InviteCodeHandler error: {e}")
+            logger.exception(f"InviteCodeHandler error: {e}")
+            event_log.log_exception(
+                "invite_code_create_failed", e,
+                endpoint="/api/invite_code",
+                invite_code=locals().get("invite_code", "") or "",
+            )
             return json.dumps({"success": False, "message": "Server error", "data": None})
 
     def GET(self):
@@ -1099,7 +1206,10 @@ class InviteCodeHandler:
             codes = db.list_invite_codes()
             return json.dumps({"success": True, "message": "Success", "data": codes}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"InviteCodeHandler error: {e}")
+            logger.exception(f"InviteCodeHandler error: {e}")
+            event_log.log_exception(
+                "invite_code_list_failed", e, endpoint="/api/invite_code",
+            )
             return json.dumps({"success": False, "message": "Server error", "data": None})
 
 
@@ -1116,7 +1226,10 @@ class UserBehaviorHandler:
             db.log_behaviors(messages)
             return json.dumps({"success": True, "message": "Success", "data": None}, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"UserBehaviorHandler error: {e}")
+            logger.exception(f"UserBehaviorHandler error: {e}")
+            event_log.log_exception(
+                "user_behavior_failed", e, endpoint="/api/user_behavior",
+            )
             return json.dumps({"success": False, "message": "Server error", "data": None})
 
 
@@ -1185,7 +1298,10 @@ class ClientEventHandler:
 
             return json.dumps({"success": True, "accepted": accepted})
         except Exception as e:
-            logger.error(f"ClientEventHandler error: {e}")
+            logger.exception(f"ClientEventHandler error: {e}")
+            event_log.log_exception(
+                "client_event_failed", e, endpoint="/api/client/event",
+            )
             return json.dumps({"success": False, "message": "Server error", "accepted": 0})
 
 
@@ -1224,8 +1340,15 @@ class AssetsHandler:
             with open(full_path, 'rb') as f:
                 return f.read()
 
+        except web.HTTPError:
+            raise
         except Exception as e:
-            logger.error(f"Error serving static file: {e}", exc_info=True)  # 添加更详细的错误信息
+            logger.error(f"Error serving static file: {e}", exc_info=True)
+            event_log.log_exception(
+                "assets_serve_failed", e,
+                endpoint="/assets",
+                file_path=file_path or "",
+            )
             raise web.notfound()
 
 
@@ -1391,5 +1514,11 @@ class WeatherHandler:
             return json.dumps({"success": True, "message": "Success", "data": response_data}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"WeatherHandler error: {e}", exc_info=True)
+            event_log.log_exception(
+                "weather_failed", e,
+                endpoint="/api/weather",
+                lat=locals().get("lat", "") or "",
+                lon=locals().get("lon", "") or "",
+            )
             return json.dumps({"success": False, "message": str(e), "data": None}, ensure_ascii=False)
 

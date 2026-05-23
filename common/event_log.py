@@ -1,9 +1,13 @@
 import json
 import logging
+import sys
+import threading
 import time
+import traceback
 from logging.handlers import RotatingFileHandler
 
 _logger = None
+_ctx = threading.local()
 
 
 def _init():
@@ -28,12 +32,114 @@ def _init():
 _init()
 
 
+def _current_context() -> dict:
+    return getattr(_ctx, "data", None) or {}
+
+
+def bind(**fields):
+    """Bind fields (request_id, user_id, ...) to the current thread.
+
+    All subsequent log()/log_exception() calls on this thread auto-merge these
+    fields, so downstream code does not need to thread request_id manually.
+    Call unbind() at the end of the request to clear.
+    """
+    data = getattr(_ctx, "data", None)
+    if data is None:
+        data = {}
+        _ctx.data = data
+    data.update(fields)
+
+
+def unbind():
+    """Clear all bound fields from the current thread."""
+    _ctx.data = None
+
+
 def log(event: str, **fields):
     """Write one structured JSON line to events.log. Never raises."""
     if _logger is None:
         return
     try:
-        record = {"event": event, "ts": time.time(), **fields}
+        merged = {**_current_context(), **fields}
+        record = {"event": event, "ts": time.time(), **merged}
         _logger.info(json.dumps(record, ensure_ascii=False, default=str))
     except Exception:
         pass
+
+
+def log_exception(event: str, exc: BaseException, **fields):
+    """Log an exception event with auto-filled error_type/error_msg/stack_trace."""
+    try:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    except Exception:
+        tb = ""
+    log(
+        event,
+        error_type=type(exc).__name__,
+        error_msg=str(exc),
+        stack_trace=tb,
+        **fields,
+    )
+
+
+_excepthooks_installed = False
+
+
+def install_excepthooks():
+    """Install global hooks so uncaught exceptions land in events.log.
+
+    Covers both the main thread (sys.excepthook) and worker threads
+    (threading.excepthook, Python 3.8+). Safe to call multiple times.
+    """
+    global _excepthooks_installed
+    if _excepthooks_installed:
+        return
+
+    _prev_sys_hook = sys.excepthook
+
+    def _sys_hook(exc_type, exc, tb):
+        try:
+            if exc is None:
+                exc = exc_type() if isinstance(exc_type, type) else Exception(str(exc_type))
+            log_exception("unhandled_exception", exc, source="sys.excepthook")
+        except Exception:
+            pass
+        try:
+            _prev_sys_hook(exc_type, exc, tb)
+        except Exception:
+            pass
+
+    sys.excepthook = _sys_hook
+
+    if hasattr(threading, "excepthook"):
+        _prev_thread_hook = threading.excepthook
+
+        def _thread_hook(args):
+            try:
+                exc = args.exc_value
+                thread_name = getattr(args.thread, "name", "")
+                if exc is None:
+                    log(
+                        "unhandled_exception",
+                        source="threading.excepthook",
+                        thread_name=thread_name,
+                        error_type=getattr(args.exc_type, "__name__", "Unknown"),
+                        error_msg="",
+                    )
+                else:
+                    log_exception(
+                        "unhandled_exception",
+                        exc,
+                        source="threading.excepthook",
+                        thread_name=thread_name,
+                    )
+            except Exception:
+                pass
+            try:
+                _prev_thread_hook(args)
+            except Exception:
+                pass
+
+        threading.excepthook = _thread_hook
+
+    _excepthooks_installed = True

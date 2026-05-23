@@ -15,6 +15,47 @@ from common.utils import expand_path
 from plugins import *
 
 try:
+    from common import event_log
+except Exception:
+    class _NoopEventLog:
+        @staticmethod
+        def log(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def log_exception(*args, **kwargs):
+            pass
+
+        @staticmethod
+        def bind(**kwargs):
+            pass
+
+        @staticmethod
+        def unbind():
+            pass
+    event_log = _NoopEventLog()
+
+
+def _bind_request_context(context):
+    """Bind request-scoped fields from context into thread-local so that any
+    downstream event_log call (LLM, tool, bridge, etc.) auto-attaches them.
+    Safe no-op if context lacks the fields."""
+    if context is None:
+        return
+    try:
+        event_log.bind(
+            request_id=context.get("request_id", "") or "",
+            user_id=context.get("user_id", -1),
+            user_group=context.get("user_group", -1),
+            phone_number=context.get("phone_number", "") or "",
+            session_id=context.get("session_id", "") or "",
+            device_id=context.get("device_id", "") or "",
+            source=context.get("source", "") or "",
+        )
+    except Exception:
+        pass
+
+try:
     from voice.audio_convert import any_to_wav
 except Exception as e:
     pass
@@ -175,18 +216,32 @@ class ChatChannel(Channel):
     def _handle(self, context: Context):
         if context is None or not context.content:
             return
-        logger.debug("[chat_channel] handling context: {}".format(context))
-        # reply鐨勬瀯寤烘楠?
-        reply = self._generate_reply(context)
+        # Bind request-scoped fields so all downstream event_log calls
+        # (LLM, tool, bridge) auto-attach request_id, user_id, etc.
+        _bind_request_context(context)
+        try:
+            logger.debug("[chat_channel] handling context: {}".format(context))
+            reply = self._generate_reply(context)
 
-        logger.debug("[chat_channel] decorating reply: {}".format(reply))
+            logger.debug("[chat_channel] decorating reply: {}".format(reply))
 
-        # reply鐨勫寘瑁呮楠?
-        if reply and reply.content:
-            reply = self._decorate_reply(context, reply)
-
-            # reply鐨勫彂閫佹楠?
-            self._send_reply(context, reply)
+            if reply and reply.content:
+                reply = self._decorate_reply(context, reply)
+                self._send_reply(context, reply)
+            else:
+                # No reply reached send(). Without this, llm_start fires but
+                # llm_done never does and the request silently disappears.
+                event_log.log(
+                    "reply_empty",
+                    reason="reply_none" if reply is None else "reply_no_content",
+                    reply_type=str(reply.type) if reply and reply.type else "",
+                )
+        except Exception as e:
+            event_log.log_exception("request_failed", e, stage="handle")
+            logger.exception(f"[chat_channel] handle failed: {e}")
+            raise
+        finally:
+            event_log.unbind()
 
     def _generate_reply(self, context: Context, reply: Reply = Reply()) -> Reply:
         e_context = PluginManager().emit_event(
@@ -519,12 +574,39 @@ class ChatChannel(Channel):
             if retry_cnt < 2:
                 time.sleep(3 + 3 * retry_cnt)
                 self._send(reply, context, retry_cnt + 1)
+            else:
+                # Final retry exhausted. The user-facing reply never landed.
+                event_log.log_exception(
+                    "send_failed",
+                    e,
+                    reply_type=str(reply.type) if reply and reply.type else "",
+                    retry_cnt=retry_cnt,
+                )
 
     def _success_callback(self, session_id, **kwargs):  # 绾跨▼姝ｅ父缁撴潫鏃剁殑鍥炶皟鍑芥暟
         logger.debug("Worker return success, session_id = {}".format(session_id))
 
     def _fail_callback(self, session_id, exception, **kwargs):  # 绾跨▼寮傚父缁撴潫鏃剁殑鍥炶皟鍑芥暟
         logger.exception("Worker return exception: {}".format(exception))
+        # The handler thread already unbound its thread-local context, so
+        # extract request fields from the captured context kwarg and pass them
+        # explicitly. Without this we lose request_id correlation for crashes.
+        try:
+            ctx = kwargs.get("context")
+            fields = {}
+            if ctx is not None:
+                fields = {
+                    "request_id": ctx.get("request_id", "") or "",
+                    "user_id": ctx.get("user_id", -1),
+                    "user_group": ctx.get("user_group", -1),
+                    "phone_number": ctx.get("phone_number", "") or "",
+                    "session_id": ctx.get("session_id", session_id) or session_id,
+                    "device_id": ctx.get("device_id", "") or "",
+                    "source": ctx.get("source", "") or "",
+                }
+            event_log.log_exception("worker_failed", exception, stage="thread_pool", **fields)
+        except Exception:
+            pass
 
     def _thread_pool_callback(self, session_id, **kwargs):
         def func(worker: Future):
@@ -538,6 +620,19 @@ class ChatChannel(Channel):
                 logger.info("Worker cancelled, session_id = {}".format(session_id))
             except Exception as e:
                 logger.exception("Worker raise exception: {}".format(e))
+                # The callback itself blew up — even worker_failed never fired.
+                ctx = kwargs.get("context")
+                fields = {}
+                if ctx is not None:
+                    try:
+                        fields = {
+                            "request_id": ctx.get("request_id", "") or "",
+                            "user_id": ctx.get("user_id", -1),
+                            "session_id": ctx.get("session_id", session_id) or session_id,
+                        }
+                    except Exception:
+                        pass
+                event_log.log_exception("callback_failed", e, stage="thread_pool_callback", **fields)
             with self.lock:
                 self.sessions[session_id][1].release()
 

@@ -14,6 +14,16 @@ from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
 from common import const
 from common.log import logger
+
+try:
+    from common import event_log
+except Exception:
+    class _NoopEventLog:
+        @staticmethod
+        def log(*args, **kwargs): pass
+        @staticmethod
+        def log_exception(*args, **kwargs): pass
+    event_log = _NoopEventLog()
 from common.utils import expand_path
 from models.openai_compatible_bot import OpenAICompatibleBot
 from agent.utils.hehe_harness import (
@@ -743,9 +753,12 @@ class AgentBridge:
             return Reply(ReplyType.TEXT, response)
             
         except Exception as e:
-            logger.error(f"Agent reply error: {e}")
+            logger.exception(f"Agent reply error: {e}")
+            # log_exception merges thread-local context (request_id, user_id, ...)
+            # bound earlier in chat_channel._handle, so request correlation works.
+            event_log.log_exception("agent_failed", e, stage="agent_reply")
             return Reply(ReplyType.ERROR, f"Agent error: {str(e)}")
-    
+
     def _create_file_reply(self, file_info: dict, text_response: str, context: Context = None) -> Reply:
         """
         Create a reply for sending files
