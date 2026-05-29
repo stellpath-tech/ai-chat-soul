@@ -94,6 +94,11 @@ available_setting = {
     "fallback_api_key": "",
     "fallback_api_base": "",
 
+    "thing_memory_enabled": True,
+    "thing_memory_extractor_model": "qwen3.5-flash",
+    "thing_memory_extractor_api_key": "",   # 提取器专用 key；不填则复用 open_ai_api_key
+    "thing_memory_extractor_api_base": "",  # 提取器专用 base；不填则复用 open_ai_api_base
+
     "qwen_access_key_id": "",
     "qwen_access_key_secret": "",
     "qwen_agent_key": "",
