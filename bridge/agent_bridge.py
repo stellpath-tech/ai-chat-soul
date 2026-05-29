@@ -851,8 +851,11 @@ class AgentBridge:
                 try:
                     from agent.memory.thing_memory import fire_extract
                     _tm_workspace = expand_path(_conf().get("agent_workspace", "~/cow"))
-                    _tm_api_key = _conf().get("open_ai_api_key", "")
-                    _tm_api_base = _conf().get("open_ai_api_base", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+                    # 优先用提取器专用 key/base，没有则回退到主模型的配置
+                    _tm_api_key = (_conf().get("thing_memory_extractor_api_key")
+                                   or _conf().get("open_ai_api_key", ""))
+                    _tm_api_base = (_conf().get("thing_memory_extractor_api_base")
+                                    or _conf().get("open_ai_api_base", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
                     _tm_model = _conf().get("thing_memory_extractor_model", "qwen3.5-flash")
                     _tm_user_msgs = []
                     for _m in agent.messages[-10:]:
