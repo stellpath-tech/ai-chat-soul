@@ -624,6 +624,8 @@ class AgentStreamExecutor:
 
                 # Parse chunk
                 if isinstance(chunk, dict) and "choices" in chunk:
+                    if not chunk["choices"]:
+                        continue
                     choice = chunk["choices"][0]
                     delta = choice.get("delta", {})
                     
