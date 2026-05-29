@@ -10,6 +10,10 @@ from typing import Optional
 
 
 def db_path(workspace_root: str) -> str:
+    # EC2 生产环境：soul.db 在 data/ 子目录
+    data_path = os.path.join(workspace_root, "data", "soul.db")
+    if os.path.exists(data_path):
+        return data_path
     return os.path.join(workspace_root, "soul.db")
 
 
