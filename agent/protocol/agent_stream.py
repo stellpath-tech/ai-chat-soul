@@ -205,11 +205,6 @@ class AgentStreamExecutor:
         else:
             user_content = [{"type": "text", "text": user_message}]
 
-        # First turn: prepend USER.md content as user message prefix (user_message_prefix)
-        if not self.messages and getattr(self.agent, "user_message_prefix", None):
-            prefix_block = {"type": "text", "text": self.agent.user_message_prefix + "\n\n"}
-            user_content = [prefix_block] + (user_content if isinstance(user_content, list) else [{"type": "text", "text": user_message}])
-
         self.messages.append({"role": "user", "content": user_content})
 
         self._emit_event("agent_start")

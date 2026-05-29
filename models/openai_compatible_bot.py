@@ -156,8 +156,9 @@ class OpenAICompatibleBot:
         """创建 openai v1.x 客户端（仅 v1.x 可用）"""
         _timeout = httpx.Timeout(connect=5.0, read=20.0, write=10.0, pool=10.0)
         # 非 OpenAI 官方地址（如国内豆包 Ark）直连，不走系统代理
+        # trust_env=False 才能真正禁用 HTTP_PROXY/ALL_PROXY 等环境变量代理；proxy=None 无效
         if api_base and "openai.com" not in api_base:
-            http_client = httpx.Client(timeout=_timeout, proxy=None)
+            http_client = httpx.Client(timeout=_timeout, trust_env=False)
         else:
             http_client = httpx.Client(timeout=_timeout)
         kwargs = {"http_client": http_client, "max_retries": 0}

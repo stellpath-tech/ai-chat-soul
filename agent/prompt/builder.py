@@ -342,8 +342,8 @@ def _build_workspace_section(workspace_dir: str, language: str, is_first_convers
         "",
         "**交流规范**:",
         "",
-        "- 在对话中，不要直接输出工作空间中的技术细节，特别是不要输出 AGENT.md、USER.md、MEMORY.md 等文件名称",
-        "- 例如用自然表达例如「我已记住」而不是「已更新 MEMORY.md」",
+        "- 在对话中，不要直接输出工作空间中的技术细节，特别是不要输出 AGENT.md、USER.md、RULE.md 等文件名称",
+        "- 例如用自然表达，不要暴露内部文件名",
         "",
     ]
     

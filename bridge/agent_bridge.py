@@ -409,19 +409,23 @@ class AgentBridge:
     
     def __init__(self, bridge: Bridge):
         self.bridge = bridge
-        self.agents = {}  # session_id -> Agent instance mapping
-        self.default_agent = None  # For backward compatibility (no session_id)
+        self.agents = {}             # session_id -> Agent instance (内存)
+        self.default_agent = None
         self.agent: Optional[Agent] = None
         self.scheduler_initialized = False
+        self._session_last_active: dict[str, float] = {}  # session_id -> timestamp
 
-        # Session persistence
         from config import conf
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
-        max_turns = conf().get("session_max_turns", 80)
-        self.session_store = SessionStore(workspace_root, max_turns=max_turns)
+        self.workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
 
         # Create helper instances
         self.initializer = AgentInitializer(bridge, self)
+
+        # 一次性初始化共享资源（system_prompt / model / tools / skill_manager）
+        self._init_shared_resources()
+
+        # 统一驱逐线程：idle > 180s → flush UserCache → 清出 agents dict
+        self._start_eviction_thread()
 
     @staticmethod
     def _sanitize_image_blocks_for_history(messages: List[dict]) -> None:
@@ -512,22 +516,120 @@ class AgentBridge:
         # Check if agent exists for this session
         if session_id not in self.agents:
             self._init_agent_for_session(session_id)
-        
+
+        import time
+        self._session_last_active[session_id] = time.time()
         return self.agents[session_id]
     
+    def _init_shared_resources(self):
+        """一次性初始化所有 session 共享的资源（启动时调用一次）。"""
+        from config import conf
+        from agent.prompt import load_context_files
+        from agent.prompt.builder import build_companion_system_prompt
+
+        # API key 迁移 / env 加载只需做一次
+        self.initializer._migrate_config_to_env(self.workspace_root)
+        self.initializer._load_env_file()
+
+        # system_prompt：从根 workspace 的 AGENT.md 读取，所有 session 共享
+        from agent.prompt import ensure_workspace
+        ensure_workspace(self.workspace_root, create_templates=True)
+        agent_files = load_context_files(self.workspace_root, ["AGENT.md"])
+        self._shared_system_prompt = build_companion_system_prompt(agent_files)
+
+        # model：无状态，所有 session 共享同一实例
+        self._shared_model = AgentLLMModel(self.bridge)
+
+        # tools：以根 workspace 为 cwd 加载，session 内通过 workspace_dir 覆盖
+        self._shared_tools = self.initializer._load_tools(self.workspace_root, session_id=None)
+
+        # skill_manager：全局技能，不区分 session
+        self._shared_skill_manager = self.initializer._initialize_skill_manager(
+            self.workspace_root, session_id=None
+        )
+
+        # runtime_info 模板（时区 / 传感器在每次请求时动态注入）
+        self._shared_runtime_info = self.initializer._get_runtime_info(self.workspace_root)
+        from config import conf
+        self._shared_runtime_info["_max_steps"] = conf().get("agent_max_steps", 20)
+        self._shared_runtime_info["_max_context_tokens"] = conf().get("agent_max_context_tokens", 50000)
+
+        logger.info("[AgentBridge] Shared resources initialized")
+
+    def _start_eviction_thread(self):
+        """每 60s 扫一次，把 idle > 180s 的 session flush 到 DB 并从内存清除。"""
+        import threading, time
+
+        def _loop():
+            while True:
+                time.sleep(60)
+                try:
+                    self._evict_stale()
+                except Exception as e:
+                    logger.warning(f"[AgentBridge] eviction error: {e}")
+
+        threading.Thread(target=_loop, daemon=True, name="agent-session-evict").start()
+
+    def _evict_stale(self):
+        import time
+        from agent.memory.user_cache import flush as cache_flush
+        now = time.time()
+        stale = [sid for sid, t in list(self._session_last_active.items()) if now - t > 180]
+        for session_id in stale:
+            try:
+                cache_flush(self.workspace_root, session_id)
+            except Exception as e:
+                logger.warning(f"[AgentBridge] flush failed for {session_id}: {e}")
+            self.agents.pop(session_id, None)
+            self._session_last_active.pop(session_id, None)
+            logger.info(f"[AgentBridge] Evicted idle session: {session_id}")
+
     def _init_default_agent(self):
-        """Initialize default super agent"""
+        """Initialize default super agent (backward compat)."""
         agent = self.initializer.initialize_agent(session_id=None)
         self.default_agent = agent
-    
+
     def _init_agent_for_session(self, session_id: str):
-        """Initialize agent for a specific session, restoring persisted history."""
-        agent = self.initializer.initialize_agent(session_id=session_id)
-        saved = self.session_store.load(session_id)
-        if saved:
-            agent.messages = saved
-            logger.info(f"[AgentBridge] Restored {len(saved)} messages for session {session_id}")
+        """新 session：复用共享资源，只初始化 per-session 的部分。"""
+        import time
+        from agent.memory.user_cache import get as cache_get
+        from agent.memory.thing_memory.store import _get_cached
+
+        # 确保 device workspace 目录存在
+        device_workspace = os.path.join(self.workspace_root, "devices", session_id)
+        os.makedirs(device_workspace, exist_ok=True)
+
+        # runtime_info 是 per-request 的，复制共享模板
+        runtime_info = dict(self._shared_runtime_info)
+
+        # 用共享资源创建 Agent，只有 workspace_dir 是 per-session 的
+        agent = Agent(
+            system_prompt=self._shared_system_prompt,
+            model=self._shared_model,
+            tools=self._shared_tools,
+            skill_manager=self._shared_skill_manager,
+            enable_skills=True,
+            workspace_dir=device_workspace,
+            max_steps=self._shared_runtime_info.get("_max_steps", 20),
+            max_context_tokens=self._shared_runtime_info.get("_max_context_tokens", 50000),
+            output_mode="logger",
+            runtime_info=runtime_info,
+        )
+
+        # 从磁盘缓存恢复对话（文件 > DB）
+        cached = cache_get(self.workspace_root, session_id)
+        if cached and cached.get("conversation"):
+            agent.messages = cached["conversation"]
+            logger.info(f"[AgentBridge] Restored {len(agent.messages)} messages for session={session_id}")
+
         self.agents[session_id] = agent
+        self._session_last_active[session_id] = time.time()
+
+        # 预热记忆缓存
+        try:
+            _get_cached(self.workspace_root, session_id)
+        except Exception:
+            pass
     
     def agent_reply(self, query: str, context: Context = None, 
                    on_event=None, clear_history: bool = False) -> Reply:
@@ -686,6 +788,18 @@ class AgentBridge:
                             block["text"], _in_trigger = filter_input(block.get("text", ""))
                             if _in_trigger:
                                 logger.info(f"[Redline] input blocked: type={_in_trigger.type} matched={_in_trigger.matched!r}")
+            # ThingMemory: inject relevant memories into system prompt
+            if _conf().get("thing_memory_enabled", True) and session_id:
+                try:
+                    from agent.memory.thing_memory import get_memory_block
+                    _tm_workspace = expand_path(_conf().get("agent_workspace", "~/cow"))
+                    _mem_block = get_memory_block(_tm_workspace, session_id, session_id)
+                    if _mem_block:
+                        append_system = f"{append_system}\n\n{_mem_block}".strip() if append_system else _mem_block
+                        logger.debug(f"[ThingMemory] injected {len(_mem_block)} chars for session={session_id}")
+                except Exception as _tme:
+                    logger.warning(f"[ThingMemory] get_memory_block error: {_tme}")
+
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
@@ -732,9 +846,36 @@ class AgentBridge:
 
             self._sanitize_image_blocks_for_history(agent.messages)
 
-            # Persist session history
+            # ThingMemory: fire-and-forget extraction
+            if _conf().get("thing_memory_enabled", True) and session_id:
+                try:
+                    from agent.memory.thing_memory import fire_extract
+                    _tm_workspace = expand_path(_conf().get("agent_workspace", "~/cow"))
+                    _tm_api_key = _conf().get("open_ai_api_key", "")
+                    _tm_api_base = _conf().get("open_ai_api_base", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+                    _tm_model = _conf().get("thing_memory_extractor_model", "qwen3.5-flash")
+                    _tm_user_msgs = []
+                    for _m in agent.messages[-10:]:
+                        if _m.get("role") == "user":
+                            _c = _m.get("content", "")
+                            if isinstance(_c, str):
+                                _tm_user_msgs.append(_c)
+                            elif isinstance(_c, list):
+                                _tm_user_msgs.append(
+                                    " ".join(p.get("text", "") for p in _c if isinstance(p, dict) and p.get("type") == "text")
+                                )
+                    if _tm_user_msgs:
+                        fire_extract(_tm_workspace, session_id, session_id, _tm_user_msgs, _tm_api_key, _tm_api_base, _tm_model)
+                except Exception as _tme:
+                    logger.warning(f"[ThingMemory] fire_extract error: {_tme}")
+
+            # 写磁盘备份（flush 到 DB 由驱逐线程负责）
             if session_id:
-                self.session_store.save(session_id, agent.messages)
+                try:
+                    from agent.memory.user_cache import update_conversation
+                    update_conversation(self.workspace_root, session_id, agent.messages)
+                except Exception as _uce:
+                    logger.debug(f"[UserCache] update_conversation failed: {_uce}")
             
             # Check if there are files to send (from read tool)
             if hasattr(agent, 'stream_executor') and hasattr(agent.stream_executor, 'files_to_send'):
@@ -885,7 +1026,7 @@ class AgentBridge:
         if session_id in self.agents:
             logger.info(f"[AgentBridge] Clearing session: {session_id}")
             del self.agents[session_id]
-        self.session_store.delete(session_id)
+        self._session_last_active.pop(session_id, None)
     
     def clear_all_sessions(self):
         """Clear all agent sessions"""

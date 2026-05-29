@@ -85,15 +85,10 @@ class AgentInitializer:
         from agent.prompt.workspace import is_first_conversation, mark_conversation_started
         is_first = is_first_conversation(agent_workspace)
 
-        # Build system prompt：
-        #   - agent.md + rule.md → system 消息（角色定义 + 行为规则，权重高）
-        #   - rule.md 每轮动态注入（由 agent.get_full_system_prompt() 实时读取）
+        # Build system prompt from AGENT.md only
         from agent.prompt.builder import build_companion_system_prompt
         agent_files = load_context_files(agent_workspace, ["AGENT.md"])
-        user_files  = load_context_files(agent_workspace, ["USER.md"])
-
-        # AGENT.md + USER.md 合并进 system prompt
-        system_prompt = build_companion_system_prompt(agent_files + user_files)
+        system_prompt = build_companion_system_prompt(agent_files)
 
         runtime_info = self._get_runtime_info(agent_workspace)
 
@@ -117,9 +112,6 @@ class AgentInitializer:
             max_context_tokens=max_context_tokens,
             runtime_info=runtime_info
         )
-
-        # rule.md 每轮动态注入：设置路径，由 get_full_system_prompt() 实时读取
-        agent.rule_path = workspace_files.rule_path
 
         return agent
     

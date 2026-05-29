@@ -19,7 +19,7 @@ class TokenBucket:
             with self.cond:
                 if self.tokens < self.capacity:
                     self.tokens += 1
-                self.cond.notify()  # 通知获取令牌的线程
+                    self.cond.notify()  # 只在实际生成了令牌时才通知
             time.sleep(1 / self.rate)
 
     def get_token(self):

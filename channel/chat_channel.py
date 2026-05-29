@@ -352,23 +352,13 @@ class ChatChannel(Channel):
 
         session_id = context.get("session_id")
         self._clear_short_term_memory(session_id)
-        self._clear_long_term_memory()
+        self._clear_long_term_memory(session_id)
         self._reset_workspace_prompts(session_id)
 
         opening = conf().get(
             "reset_opening_message",
             "重置好啦✨我是满仓，要先吃点小饼干吗？"
         )
-
-        # 把 opening 写入新 session 的历史，让模型能看到这句开场白
-        if session_id:
-            try:
-                bridge = Bridge()
-                chat_bot = bridge.get_bot("chat")
-                if hasattr(chat_bot, "sessions"):
-                    chat_bot.sessions.session_reply(opening, session_id)
-            except Exception as e:
-                logger.warning(f"[chat_channel] failed to add opening to session: {e}")
 
         logger.info(f"[chat_channel] reset command handled, session_id={session_id}")
         return Reply(ReplyType.TEXT, opening)
@@ -415,8 +405,75 @@ class ChatChannel(Channel):
             except Exception as e:
                 logger.warning(f"[chat_channel] reset workspace prompts failed for {workspace_dir}: {e}")
 
-    def _clear_long_term_memory(self):
-        pass
+    def _clear_long_term_memory(self, session_id):
+        if not session_id:
+            return
+        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+
+        # 1. 删除 thing_memory 里该用户所有记忆
+        try:
+            from agent.memory.thing_memory.store import _conn, db_path, _invalidate
+            path = db_path(workspace_root)
+            if os.path.exists(path):
+                with _conn(path) as conn:
+                    conn.execute("DELETE FROM thing_memory WHERE user_id=?", (session_id,))
+                    conn.commit()
+            _invalidate(workspace_root, session_id)
+        except Exception as e:
+            logger.warning(f"[chat_channel] clear thing_memory failed: {e}")
+
+        # 2. 把当前对话全部归档到 conversation_archive，然后清空 current_setting
+        try:
+            from agent.memory.thing_memory.store import _conn, db_path, archive_messages
+            from agent.memory.user_cache import _file_path, _read
+            import json as _json
+            path = db_path(workspace_root)
+
+            # 优先从文件缓存取（完整消息），否则从 current_setting 取
+            messages_to_archive = []
+            fpath = _file_path(workspace_root, session_id)
+            cached = _read(fpath)
+            if cached:
+                messages_to_archive = cached.get("conversation", [])
+            elif os.path.exists(path):
+                with _conn(path) as conn:
+                    row = conn.execute(
+                        "SELECT conversation FROM current_setting WHERE user_id=?", (session_id,)
+                    ).fetchone()
+                if row and row["conversation"]:
+                    messages_to_archive = _json.loads(row["conversation"])
+
+            if messages_to_archive:
+                archive_messages(workspace_root, session_id, messages_to_archive)
+
+            if os.path.exists(path):
+                with _conn(path) as conn:
+                    conn.execute("DELETE FROM current_setting WHERE user_id=?", (session_id,))
+                    conn.commit()
+        except Exception as e:
+            logger.warning(f"[chat_channel] archive + clear current_setting failed: {e}")
+
+        # 3. 删除磁盘文件缓存
+        try:
+            from agent.memory.user_cache import _file_path
+            fpath = _file_path(workspace_root, session_id)
+            if os.path.exists(fpath):
+                os.remove(fpath)
+        except Exception as e:
+            logger.warning(f"[chat_channel] clear user cache file failed: {e}")
+
+        # 4. 如果 session_id 是 user_{id} 格式，同步清除 soul.db user 表里的昵称
+        if session_id.startswith("user_"):
+            try:
+                uid_int = int(session_id[5:])
+                from agent.memory.thing_memory.store import _conn, db_path
+                path = db_path(workspace_root)
+                if os.path.exists(path):
+                    with _conn(path) as conn:
+                        conn.execute("UPDATE user SET nickname=NULL WHERE id=?", (uid_int,))
+                        conn.commit()
+            except Exception as e:
+                logger.warning(f"[chat_channel] clear user.nickname failed: {e}")
 
     def _decorate_reply(self, context: Context, reply: Reply) -> Reply:
         if reply and reply.type:

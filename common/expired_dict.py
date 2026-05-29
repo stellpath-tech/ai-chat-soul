@@ -11,7 +11,6 @@ class ExpiredDict(dict):
         if datetime.now() > expiry_time:
             del self[key]
             raise KeyError("expired {}".format(key))
-        self.__setitem__(key, value)
         return value
 
     def __setitem__(self, key, value):
@@ -36,7 +35,13 @@ class ExpiredDict(dict):
         return [key for key in keys if key in self]
 
     def items(self):
-        return [(key, self[key]) for key in self.keys()]
+        result = []
+        for key in self.keys():
+            try:
+                result.append((key, self[key]))
+            except KeyError:
+                pass
+        return result
 
     def __iter__(self):
         return self.keys().__iter__()

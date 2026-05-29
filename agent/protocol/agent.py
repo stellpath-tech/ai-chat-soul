@@ -51,8 +51,6 @@ class Agent:
         self.workspace_dir = workspace_dir  # Workspace directory
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
-        self.rule_path: Optional[str] = None  # RULE.md path for per-turn dynamic injection
-        self.user_message_prefix: Optional[str] = None  # USER.md content prepended to first user message
         self._time_cache: Optional[dict] = None  # {"line": str, "ts": float, "tz_offset": int|None}
         
         # Initialize skill manager
@@ -105,78 +103,21 @@ class Agent:
         Get the full system prompt for the current turn.
 
         Injection strategy:
-        - self.system_prompt: static base (agent.md only → system message)
-        - rule.md: dynamically reloaded and appended on every turn via self.rule_path (→ system)
-        - user_message_prefix: user.md prepended to first user message (→ user message)
+        - self.system_prompt: AGENT.md content (set once at init)
+        - current time + sensor: appended dynamically each turn via runtime_info
         """
         prompt = self.system_prompt
 
-        # Per-turn: reload and append RULE.md（含颜文字随机注入）
-        if self.rule_path and os.path.exists(self.rule_path):
-            try:
-                from config import conf
-
-                random_style_enabled = bool(conf().get("random_style_injection_enabled", True))
-                random_kaomoji_enabled = bool(conf().get("random_kaomoji_injection_enabled", True))
-
-                with open(self.rule_path, 'r', encoding='utf-8') as f:
-                    rule_content = f.read().strip()
-                if rule_content:
-                    # 随机分配本轮颜文字，替换 {kaomoji_today} 占位符
-                    if "{kaomoji_today}" in rule_content:
-                        if random_kaomoji_enabled:
-                            try:
-                                from agent.utils.kaomoji import pick_kaomoji
-                                _km = pick_kaomoji()
-                                self._last_kaomoji = _km   # 供 run_stream 注入用户消息
-                                rule_content = rule_content.replace("{kaomoji_today}", _km)
-                            except Exception as _ke:
-                                logger.warning(f"[Agent] kaomoji injection failed: {_ke}")
-                                self._last_kaomoji = ""
-                                rule_content = rule_content.replace("{kaomoji_today}", "")
-                        else:
-                            self._last_kaomoji = ""
-                            rule_content = rule_content.replace("{kaomoji_today}", "")
-                    else:
-                        self._last_kaomoji = ""
-                    # 随机分配本轮风格模式，替换 {style_today} 占位符
-                    if "{style_today}" in rule_content:
-                        if random_style_enabled:
-                            try:
-                                from agent.utils.style import pick_style
-                                _style = pick_style()
-                                rule_content = rule_content.replace("{style_today}", _style)
-                            except Exception as _se:
-                                logger.warning(f"[Agent] style injection failed: {_se}")
-                                rule_content = rule_content.replace("{style_today}", "")
-                        else:
-                            rule_content = rule_content.replace("{style_today}", "")
-                    prompt = (prompt + "\n\n" + rule_content) if prompt else rule_content
-            except Exception as e:
-                logger.warning(f"[Agent] Failed to reload RULE.md: {e}")
-
-        # Per-turn: inject current time + season from runtime_info
-        # Cached: recompute only when timezone changes or >1 hour has passed
+        # Per-turn: inject current time from runtime_info (recomputed every turn, no cache)
         if self.runtime_info and callable(self.runtime_info.get("_get_current_time")):
             try:
-                tz_info = self.runtime_info.get("request_timezone") or {}
-                tz_offset = tz_info.get("tz_offset_min") if isinstance(tz_info, dict) else None
-                now_ts = time.time()
-                cache = self._time_cache
-                if cache and cache["tz_offset"] == tz_offset and now_ts - cache["ts"] < 3600:
-                    pass  # use cached time_str below
-                else:
-                    time_info = self.runtime_info["_get_current_time"]()
-                    # 格式与训练数据一致：2026年5月10日 周日 14:22
-                    date_str, clock_str = time_info["time"].split(" ")[:2]
-                    y, m, d = date_str.split("-")
-                    weekday_short = time_info["weekday"].replace("星期", "周")
-                    hhmm = clock_str[:5]
-                    self._time_cache = {
-                        "time_str": f"{y}年{int(m)}月{int(d)}日 {weekday_short} {hhmm}",
-                        "ts": now_ts, "tz_offset": tz_offset,
-                    }
-                time_str = self._time_cache["time_str"]
+                time_info = self.runtime_info["_get_current_time"]()
+                # 格式与训练数据一致：2026年5月10日 周日 14:22
+                date_str, clock_str = time_info["time"].split(" ")[:2]
+                y, m, d = date_str.split("-")
+                weekday_short = time_info["weekday"].replace("星期", "周")
+                hhmm = clock_str[:5]
+                time_str = f"{y}年{int(m)}月{int(d)}日 {weekday_short} {hhmm}"
                 state_lines = ["[背景状态]", f"当前时间：{time_str}"]
                 sensor_label = self.runtime_info.get("sensor_label", "") if self.runtime_info else ""
                 if sensor_label:

@@ -87,7 +87,6 @@ _HACK_PATS = [
     r"\bRULE\.md\b",
     r"\bUSER\.md\b",
     r"\bSOUL\.md\b",
-    r"\bMEMORY\.md\b",
     r"\w+\.md\b",
     # Chinese prompt-injection / jailbreak wording
     r"(?:进入|切换到|开启).{0,6}开发者模式",

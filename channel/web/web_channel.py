@@ -542,7 +542,16 @@ class WebChannel(ChatChannel):
                     session_id = device_id
                 else:
                     session_id = json_data.get('session_id', f'session_{int(time.time())}')
-                    
+
+            # 任何请求进来都预热磁盘缓存（冷启动时从 DB 加载，热时仅刷新 last_active）
+            try:
+                from agent.memory.user_cache import touch as _cache_touch
+                from config import conf as _conf
+                from common.utils import expand_path as _expand
+                _cache_touch(_expand(_conf().get("agent_workspace", "~/cow")), session_id)
+            except Exception:
+                pass
+
             prompt = json_data.get('message', '')
             image_b64 = json_data.get('image', '')   # base64 编码的图片（可选）
             image_url_input = json_data.get('image_url', '')  # OSS/CDN URL（可选，与 image 二选一）
@@ -553,7 +562,7 @@ class WebChannel(ChatChannel):
                 _url_match = _re.search(r'https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?', prompt, _re.IGNORECASE)
                 if _url_match:
                     image_url_input = _url_match.group(0)
-                    prompt = prompt[:_url_match.start()].strip() or prompt[_url_match.end():].strip()
+                    prompt = (prompt[:_url_match.start()] + " " + prompt[_url_match.end():]).strip()
             use_sse = json_data.get('stream', True)
             timezone     = json_data.get('timezone')
             sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传

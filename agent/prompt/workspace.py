@@ -16,9 +16,6 @@ from .builder import ContextFile
 
 # 默认文件名常量
 DEFAULT_AGENT_FILENAME = "AGENT.md"
-DEFAULT_USER_FILENAME = "USER.md"
-DEFAULT_RULE_FILENAME = "RULE.md"
-DEFAULT_MEMORY_FILENAME = "MEMORY.md"
 DEFAULT_STATE_FILENAME = ".agent_state.json"
 
 
@@ -26,84 +23,35 @@ DEFAULT_STATE_FILENAME = ".agent_state.json"
 class WorkspaceFiles:
     """工作空间文件路径"""
     agent_path: str
-    user_path: str
-    rule_path: str
-    memory_path: str
-    memory_dir: str
     state_path: str
 
 
 def ensure_workspace(workspace_dir: str, create_templates: bool = True) -> WorkspaceFiles:
-    """
-    确保工作空间存在，并创建必要的模板文件
-    
-    Args:
-        workspace_dir: 工作空间目录路径
-        create_templates: 是否创建模板文件（首次运行时）
-        
-    Returns:
-        WorkspaceFiles对象，包含所有文件路径
-    """
-    # 确保目录存在
+    """确保工作空间存在，并同步 AGENT.md 模板"""
     os.makedirs(workspace_dir, exist_ok=True)
-    
-    # 定义文件路径
-    agent_path = os.path.join(workspace_dir, DEFAULT_AGENT_FILENAME)
-    user_path = os.path.join(workspace_dir, DEFAULT_USER_FILENAME)
-    rule_path = os.path.join(workspace_dir, DEFAULT_RULE_FILENAME)
-    memory_path = os.path.join(workspace_dir, DEFAULT_MEMORY_FILENAME)  # MEMORY.md 在根目录
-    memory_dir = os.path.join(workspace_dir, "memory")  # 每日记忆子目录
-    state_path = os.path.join(workspace_dir, DEFAULT_STATE_FILENAME)  # 状态文件
-    
-    # 创建memory子目录
-    os.makedirs(memory_dir, exist_ok=True)
 
-    # 创建skills子目录 (for workspace-level skills installed by agent)
+    agent_path = os.path.join(workspace_dir, DEFAULT_AGENT_FILENAME)
+    state_path = os.path.join(workspace_dir, DEFAULT_STATE_FILENAME)
+
     skills_dir = os.path.join(workspace_dir, "skills")
     os.makedirs(skills_dir, exist_ok=True)
-    
-    # AGENT.md / USER.md / RULE.md / MEMORY.md：每次启动都从 templates/ 同步覆盖
+
     if create_templates:
         _sync_template(agent_path, _get_agent_template())
-        _sync_template(user_path, _get_user_template())
-        _sync_template(rule_path, _get_rule_template())
-        _sync_template(memory_path, _get_memory_template())
-        
         logger.debug(f"[Workspace] Initialized workspace at: {workspace_dir}")
-    
-    return WorkspaceFiles(
-        agent_path=agent_path,
-        user_path=user_path,
-        rule_path=rule_path,
-        memory_path=memory_path,
-        memory_dir=memory_dir,
-        state_path=state_path
-    )
+
+    return WorkspaceFiles(agent_path=agent_path, state_path=state_path)
 
 
 def overwrite_workspace_prompts(workspace_dir: str) -> WorkspaceFiles:
-    """
-    Force reset workspace prompt files from the repo templates.
-
-    This overwrites AGENT.md / USER.md / RULE.md in the target workspace so
-    that runtime-customized prompt files can be restored to the repository
-    defaults during a reset flow.
-    """
+    """Reset AGENT.md from repo template (called on user reset command)."""
     workspace_files = ensure_workspace(workspace_dir, create_templates=True)
-    template_pairs = [
-        (workspace_files.agent_path, _get_agent_template()),
-        (workspace_files.user_path, _get_user_template()),
-        (workspace_files.rule_path, _get_rule_template()),
-    ]
-
-    for filepath, content in template_pairs:
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info(f"[Workspace] Reset prompt template: {filepath}")
-        except Exception as e:
-            logger.warning(f"[Workspace] Failed to reset prompt template {filepath}: {e}")
-
+    try:
+        with open(workspace_files.agent_path, "w", encoding="utf-8") as f:
+            f.write(_get_agent_template())
+        logger.info(f"[Workspace] Reset prompt template: {workspace_files.agent_path}")
+    except Exception as e:
+        logger.warning(f"[Workspace] Failed to reset prompt template: {e}")
     return workspace_files
 
 
@@ -119,12 +67,7 @@ def load_context_files(workspace_dir: str, files_to_load: Optional[List[str]] = 
         ContextFile对象列表
     """
     if files_to_load is None:
-        # 默认加载的文件（按优先级排序）
-        files_to_load = [
-            DEFAULT_AGENT_FILENAME,
-            DEFAULT_USER_FILENAME,
-            DEFAULT_RULE_FILENAME,
-        ]
+        files_to_load = [DEFAULT_AGENT_FILENAME]
     
     context_files = []
     
@@ -222,27 +165,6 @@ def _read_template_file(filename: str, fallback: str = "") -> str:
 def _get_agent_template() -> str:
     """Agent人格设定模板 - 从 templates/AGENT.md 读取"""
     return _read_template_file("AGENT.md", fallback="# AGENT.md\n")
-
-
-def _get_user_template() -> str:
-    """用户身份信息模板 - 从 templates/USER.md 读取"""
-    return _read_template_file("USER.md", fallback="# USER.md\n")
-
-
-def _get_rule_template() -> str:
-    """工作空间规则模板 - 从 templates/RULE.md 读取"""
-    return _read_template_file("RULE.md", fallback="# RULE.md\n")
-
-
-def _get_memory_template() -> str:
-    """长期记忆模板 - 创建一个空文件，由 Agent 自己填充"""
-    return """# MEMORY.md - 长期记忆
-
-*这是你的长期记忆文件。记录重要的事件、决策、偏好、学到的教训。*
-
----
-
-"""
 
 
 # ============= 状态管理 =============

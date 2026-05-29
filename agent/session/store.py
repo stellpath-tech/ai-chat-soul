@@ -12,7 +12,8 @@ from common.log import logger
 
 
 class SessionStore:
-    def __init__(self, workspace_root: str, max_turns: int = 80):
+    def __init__(self, workspace_root: str, max_turns: int = 40):
+        self.workspace_root = workspace_root
         self.sessions_dir = os.path.join(workspace_root, "sessions")
         self.max_turns = max_turns
         self._lock = threading.Lock()
@@ -34,11 +35,10 @@ class SessionStore:
 
     def save(self, session_id: str, messages: List[Dict]):
         path = self._path(session_id)
-        truncated = self._truncate(messages)
         try:
             with self._lock:
                 with open(path, "w", encoding="utf-8") as f:
-                    json.dump({"messages": truncated}, f, ensure_ascii=False, indent=2)
+                    json.dump({"messages": messages}, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"[SessionStore] save failed ({session_id}): {e}")
 
