@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>客诉浏览</title>
+  <style>
+    :root {
+      color: #ededed;
+      background: #000;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; background: #000; }
+    button, input, select, textarea { font: inherit; }
+    button {
+      border: 0;
+      cursor: pointer;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease, opacity 140ms ease;
+    }
+    button:active { transform: translateY(1px); }
+
+    .app-shell {
+      width: min(1440px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 24px 0 48px;
+    }
+
+    .panel {
+      border: 1px solid #1f1f1f;
+      border-radius: 10px;
+      background: #050505;
+    }
+
+    .hero {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 28px;
+      margin-bottom: 12px;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: #888;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, p { margin-top: 0; }
+    h1 {
+      max-width: 760px;
+      margin-bottom: 14px;
+      color: #fff;
+      font-size: clamp(34px, 4vw, 58px);
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: -0.055em;
+    }
+
+    .hero-copy {
+      max-width: 720px;
+      margin-bottom: 0;
+      color: #999;
+      font-size: 15px;
+      line-height: 1.7;
+    }
+
+    .metric-card {
+      min-width: 270px;
+      align-self: stretch;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 8px;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 22px;
+      background: #0a0a0a;
+    }
+
+    .metric-card span, .muted { color: #8a8a8a; }
+    .metric-card strong {
+      color: #fff;
+      font-size: 34px;
+      font-weight: 650;
+      letter-spacing: -0.055em;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) 160px 140px auto;
+      gap: 10px;
+      padding: 14px;
+      margin-bottom: 12px;
+      align-items: center;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid #242424;
+      border-radius: 7px;
+      padding: 10px 11px;
+      color: #ededed;
+      background: #080808;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 76px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      border-color: #555;
+      background: #0c0c0c;
+    }
+
+    .button {
+      border: 1px solid #2b2b2b;
+      border-radius: 7px;
+      padding: 10px 13px;
+      color: #ededed;
+      background: #0b0b0b;
+      font-size: 13px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .button:hover { color: #fff; background: #151515; }
+    .button.primary { color: #000; background: #fff; border-color: #fff; }
+    .button.danger { color: #ff9a9a; border-color: #3a2222; background: #120808; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 360px;
+      gap: 12px;
+    }
+
+    .list-panel, .detail-panel { padding: 14px; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 860px; }
+    th, td {
+      border-bottom: 1px solid #171717;
+      padding: 12px 10px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 13px;
+    }
+    th {
+      color: #777;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    tr.feedback-row { cursor: pointer; }
+    tr.feedback-row:hover { background: #0b0b0b; }
+    tr.feedback-row.active { background: #111; }
+
+    .desc {
+      max-width: 420px;
+      color: #f3f3f3;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border: 1px solid #2a2a2a;
+      border-radius: 999px;
+      padding: 5px 9px;
+      color: #ddd;
+      background: #0b0b0b;
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    .pill.need { color: #ffd48a; border-color: #3e331a; background: #151005; }
+    .pill.fixed { color: #96e6b0; border-color: #193723; background: #07130b; }
+    .pill.unmarked { color: #9cb9ff; border-color: #1d2c4d; background: #071022; }
+    .pill.none { color: #aaa; }
+
+    .detail-title {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .detail-title h2 {
+      margin: 0;
+      color: #fff;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+    }
+
+    .detail-block {
+      border-top: 1px solid #171717;
+      padding-top: 13px;
+      margin-top: 13px;
+    }
+
+    .detail-block label {
+      display: block;
+      margin-bottom: 8px;
+      color: #777;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .meta-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .meta-row {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      gap: 10px;
+      align-items: baseline;
+      border: 1px solid #1b1b1b;
+      border-radius: 7px;
+      padding: 9px 10px;
+      background: #080808;
+    }
+
+    .meta-row span {
+      color: #777;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .meta-row strong {
+      min-width: 0;
+      color: #ededed;
+      font-size: 13px;
+      font-weight: 500;
+      overflow-wrap: anywhere;
+    }
+
+    .image-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .image-thumb {
+      display: block;
+      overflow: hidden;
+      border: 1px solid #202020;
+      border-radius: 8px;
+      background: #080808;
+      aspect-ratio: 1;
+    }
+
+    .image-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .comment {
+      border: 1px solid #202020;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 8px;
+      background: #090909;
+    }
+    .comment p {
+      margin: 0 0 8px;
+      color: #ededed;
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    .comment small { color: #777; }
+
+    .pager {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding-top: 14px;
+      color: #888;
+      font-size: 13px;
+    }
+
+    .login-shell {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .login-card {
+      width: min(440px, 100%);
+      padding: 24px;
+    }
+    .login-card h1 {
+      font-size: 38px;
+      margin-bottom: 12px;
+    }
+
+    .hidden { display: none !important; }
+    .error { color: #ff9a9a; font-size: 13px; min-height: 20px; }
+
+    .token-link {
+      display: inline-flex;
+      margin-top: 10px;
+      color: #aaa;
+      font-size: 13px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+
+    .token-link:hover { color: #fff; }
+
+    @media (max-width: 980px) {
+      .hero, .layout { grid-template-columns: 1fr; display: grid; }
+      .toolbar { grid-template-columns: 1fr 1fr; }
+      .metric-card { min-width: 0; }
+    }
+
+    @media (max-width: 640px) {
+      .app-shell { width: min(100% - 24px, 1440px); padding-top: 12px; }
+      .toolbar { grid-template-columns: 1fr; }
+      .hero { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <section id="loginView" class="login-shell">
+    <div class="panel login-card">
+      <p class="eyebrow">Complaint Console</p>
+      <h1>客诉浏览</h1>
+      <p class="hero-copy">输入口令后进入后台。口令会保存在本机浏览器，后续进入页面会自动校验。</p>
+      <div style="height: 18px"></div>
+      <input id="passcodeInput" type="password" placeholder="输入访问口令">
+      <a class="token-link" href="https://ecnhmcc1f7mq.feishu.cn/wiki/KIy6weNvniJsWxkAs0DcazMunRf" target="_blank" rel="noopener noreferrer">获取 token</a>
+      <div style="height: 10px"></div>
+      <button id="loginButton" class="button primary" type="button">进入</button>
+      <p id="loginError" class="error"></p>
+    </div>
+  </section>
+
+  <main id="appView" class="app-shell hidden">
+    <section class="panel hero">
+      <div>
+        <p class="eyebrow">Complaint Console</p>
+        <h1>客诉浏览</h1>
+        <p class="hero-copy">查看用户反馈，按内容搜索、按状态收敛处理队列，并为每条客诉追加多条处理 comment。</p>
+      </div>
+      <div class="metric-card">
+        <span>当前结果</span>
+        <strong id="totalCount">0</strong>
+        <small class="muted" id="statusSummary">未标记 0 · 需要修复 0 · 已修复 0 · 无需修复 0</small>
+      </div>
+    </section>
+
+    <section class="panel toolbar">
+      <input id="keywordInput" placeholder="搜索客诉内容或联系方式">
+      <select id="statusFilter">
+        <option value="">全部状态</option>
+        <option value="未标记">未标记</option>
+        <option value="需要修复">需要修复</option>
+        <option value="已修复">已修复</option>
+        <option value="无需修复">无需修复</option>
+      </select>
+      <select id="orderSelect">
+        <option value="desc">时间倒序</option>
+        <option value="asc">时间正序</option>
+      </select>
+      <button id="refreshButton" class="button primary" type="button">查询</button>
+    </section>
+
+    <section class="layout">
+      <div class="panel list-panel">
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>状态</th>
+                <th>内容</th>
+                <th>联系方式</th>
+                <th>类型</th>
+                <th>评论</th>
+                <th>时间</th>
+              </tr>
+            </thead>
+            <tbody id="feedbackBody"></tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <span id="pageInfo">第 1 页</span>
+          <div>
+            <button id="prevButton" class="button" type="button">上一页</button>
+            <button id="nextButton" class="button" type="button">下一页</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="panel detail-panel">
+        <div id="emptyDetail" class="muted">选择一条客诉查看详情。</div>
+        <div id="detailView" class="hidden">
+          <div class="detail-title">
+            <h2 id="detailTitle">#</h2>
+            <button id="logoutButton" class="button danger" type="button">退出</button>
+          </div>
+
+          <div class="detail-block">
+            <label>处理状态</label>
+            <select id="detailStatus">
+              <option value="未标记" disabled>未标记</option>
+              <option value="需要修复">需要修复</option>
+              <option value="已修复">已修复</option>
+              <option value="无需修复">无需修复</option>
+            </select>
+          </div>
+
+          <div class="detail-block">
+            <label>客诉内容</label>
+            <p id="detailDescription" class="desc"></p>
+          </div>
+
+          <div class="detail-block">
+            <label>用户信息</label>
+            <div class="meta-grid" id="detailMeta"></div>
+          </div>
+
+          <div class="detail-block">
+            <label>图片</label>
+            <div id="detailImages"></div>
+          </div>
+
+          <div class="detail-block">
+            <label>Comments</label>
+            <div id="commentList"></div>
+            <textarea id="commentInput" placeholder="追加处理记录"></textarea>
+            <div style="height: 8px"></div>
+            <button id="commentButton" class="button primary" type="button">追加 Comment</button>
+          </div>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <script>
+    const storageKey = 'complaint-admin-passcode-v1';
+    const pageSize = 30;
+    let passcode = '';
+    let offset = 0;
+    let selectedId = null;
+    let currentItems = [];
+
+    const $ = (id) => document.getElementById(id);
+
+    function statusClass(status) {
+      if (status === '未标记') return 'unmarked';
+      if (status === '需要修复') return 'need';
+      if (status === '已修复') return 'fixed';
+      return 'none';
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
+    }
+
+    async function api(path, options = {}) {
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-admin-passcode': passcode,
+        ...(options.headers || {}),
+      };
+      const response = await fetch(path, { ...options, headers });
+      const payload = await response.json().catch(() => ({ success: false, message: 'Invalid response' }));
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.message || '请求失败');
+      }
+      return payload.data;
+    }
+
+    async function verifyPasscode(candidate) {
+      passcode = candidate;
+      await api('/api/admin/complaints/auth', { method: 'POST', body: JSON.stringify({ passcode: candidate }) });
+      localStorage.setItem(storageKey, candidate);
+      $('loginView').classList.add('hidden');
+      $('appView').classList.remove('hidden');
+      await loadFeedbacks(true);
+    }
+
+    async function loadFeedbacks(reset = false) {
+      if (reset) offset = 0;
+      const params = new URLSearchParams({
+        keyword: $('keywordInput').value.trim(),
+        status: $('statusFilter').value,
+        order: $('orderSelect').value,
+        limit: String(pageSize),
+        offset: String(offset),
+      });
+      const data = await api(`/api/admin/complaints?${params.toString()}`);
+      currentItems = data.items || [];
+      renderList(data);
+      if (currentItems.length && !currentItems.some((item) => item.id === selectedId)) {
+        selectFeedback(currentItems[0].id);
+      } else if (!currentItems.length) {
+        clearDetail();
+      } else {
+        selectFeedback(selectedId);
+      }
+    }
+
+    function renderList(data) {
+      $('totalCount').textContent = data.total || 0;
+      const counts = data.statusCounts || {};
+      $('statusSummary').textContent = `未标记 ${counts['未标记'] || 0} · 需要修复 ${counts['需要修复'] || 0} · 已修复 ${counts['已修复'] || 0} · 无需修复 ${counts['无需修复'] || 0}`;
+      $('pageInfo').textContent = `第 ${Math.floor(offset / pageSize) + 1} 页 · ${offset + 1}-${offset + currentItems.length}`;
+      $('prevButton').disabled = offset === 0;
+      $('nextButton').disabled = offset + pageSize >= (data.total || 0);
+
+      $('feedbackBody').innerHTML = currentItems.map((item) => `
+        <tr class="feedback-row ${item.id === selectedId ? 'active' : ''}" data-id="${item.id}">
+          <td>#${item.id}</td>
+          <td><span class="pill ${statusClass(item.repairStatus)}">${escapeHtml(item.repairStatus)}</span></td>
+          <td><div class="desc">${escapeHtml(item.description)}</div></td>
+          <td>${escapeHtml(item.contact || item.phoneNumber || '-')}</td>
+          <td>${escapeHtml(item.type || '-')}</td>
+          <td>${item.commentCount || 0}</td>
+          <td class="muted">${escapeHtml(item.createdAt)}</td>
+        </tr>
+      `).join('');
+
+      document.querySelectorAll('.feedback-row').forEach((row) => {
+        row.addEventListener('click', () => selectFeedback(Number(row.dataset.id)));
+      });
+    }
+
+    function selectFeedback(id) {
+      selectedId = id;
+      const item = currentItems.find((row) => row.id === id);
+      if (!item) return clearDetail();
+      document.querySelectorAll('.feedback-row').forEach((row) => row.classList.toggle('active', Number(row.dataset.id) === id));
+      $('emptyDetail').classList.add('hidden');
+      $('detailView').classList.remove('hidden');
+      $('detailTitle').textContent = `#${item.id}`;
+      $('detailStatus').value = item.repairStatus;
+      $('detailDescription').textContent = item.description;
+      $('detailMeta').innerHTML = `
+        <div class="meta-row"><span>用户</span><strong>${escapeHtml(item.userId)}</strong></div>
+        <div class="meta-row"><span>手机号</span><strong>${escapeHtml(item.phoneNumber || '无手机号')}</strong></div>
+        <div class="meta-row"><span>联系方式</span><strong>${escapeHtml(item.contact || '未填写')}</strong></div>
+        <div class="meta-row"><span>提交时间</span><strong>${escapeHtml(item.createdAt)}</strong></div>
+      `;
+      renderImages(item.images || []);
+      renderComments(item.comments || []);
+    }
+
+    function renderImages(images) {
+      $('detailImages').innerHTML = images.length ? `
+        <div class="image-grid">
+          ${images.map((url) => `
+            <a class="image-thumb" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">
+              <img src="${escapeHtml(url)}" alt="客诉图片" loading="lazy">
+            </a>
+          `).join('')}
+        </div>
+      ` : '<p class="muted">暂无图片。</p>';
+    }
+
+    function renderComments(comments) {
+      $('commentList').innerHTML = comments.length ? comments.map((comment) => `
+        <div class="comment">
+          <p>${escapeHtml(comment.content)}</p>
+          <small>${escapeHtml(comment.createdAt)}</small>
+        </div>
+      `).join('') : '<p class="muted">暂无 comment。</p>';
+    }
+
+    function clearDetail() {
+      selectedId = null;
+      $('emptyDetail').classList.remove('hidden');
+      $('detailView').classList.add('hidden');
+    }
+
+    async function updateStatus() {
+      if (!selectedId) return;
+      await api('/api/admin/complaints/status', {
+        method: 'PUT',
+        body: JSON.stringify({ feedbackId: selectedId, status: $('detailStatus').value }),
+      });
+      await loadFeedbacks(false);
+    }
+
+    async function addComment() {
+      if (!selectedId) return;
+      const content = $('commentInput').value.trim();
+      if (!content) return;
+      await api('/api/admin/complaints/comment', {
+        method: 'POST',
+        body: JSON.stringify({ feedbackId: selectedId, content }),
+      });
+      $('commentInput').value = '';
+      await loadFeedbacks(false);
+    }
+
+    $('loginButton').addEventListener('click', async () => {
+      $('loginError').textContent = '';
+      try {
+        await verifyPasscode($('passcodeInput').value.trim());
+      } catch (error) {
+        $('loginError').textContent = '口令错误';
+      }
+    });
+
+    $('passcodeInput').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') $('loginButton').click();
+    });
+    $('refreshButton').addEventListener('click', () => loadFeedbacks(true));
+    $('keywordInput').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') loadFeedbacks(true);
+    });
+    $('statusFilter').addEventListener('change', () => loadFeedbacks(true));
+    $('orderSelect').addEventListener('change', () => loadFeedbacks(true));
+    $('prevButton').addEventListener('click', () => {
+      offset = Math.max(0, offset - pageSize);
+      loadFeedbacks(false);
+    });
+    $('nextButton').addEventListener('click', () => {
+      offset += pageSize;
+      loadFeedbacks(false);
+    });
+    $('detailStatus').addEventListener('change', updateStatus);
+    $('commentButton').addEventListener('click', addComment);
+    $('logoutButton').addEventListener('click', () => {
+      localStorage.removeItem(storageKey);
+      location.reload();
+    });
+
+    (async function boot() {
+      const stored = localStorage.getItem(storageKey);
+      if (!stored) return;
+      try {
+        await verifyPasscode(stored);
+      } catch {
+        localStorage.removeItem(storageKey);
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -30,6 +30,69 @@ except Exception:
             pass
     event_log = _NoopEventLog()
 
+COMPLAINT_ADMIN_PASSCODE = "320e0ec38f2cc0e2ea9697a52693b1c44089f7b017e0540125bdfffa03bf298e"
+REPAIR_STATUSES = {"需要修复", "已修复", "无需修复"}
+COMPLAINT_FILTER_STATUSES = REPAIR_STATUSES | {"未标记"}
+
+
+def _api_response(success, message, data=None, **extra):
+    body = {"success": success, "message": message, "data": data}
+    body.update(extra)
+    return json.dumps(body, ensure_ascii=False)
+
+
+def _auth_user():
+    auth_token = web.ctx.env.get("HTTP_X_AUTH_TOKEN", "").strip()
+    user = db.get_active_user_by_token(auth_token)
+    if not user:
+        return None
+    return user
+
+
+def _admin_passcode_from_request():
+    header_passcode = web.ctx.env.get("HTTP_X_ADMIN_PASSCODE", "").strip()
+    if header_passcode:
+        return header_passcode
+    try:
+        params = web.input(passcode="")
+        if params.passcode:
+            return params.passcode.strip()
+    except Exception:
+        pass
+    try:
+        data = json.loads(web.data() or b"{}")
+        return str(data.get("passcode") or "").strip()
+    except Exception:
+        return ""
+
+
+def _admin_authorized():
+    return _admin_passcode_from_request() == COMPLAINT_ADMIN_PASSCODE
+
+
+def _require_admin():
+    if _admin_authorized():
+        return None
+    web.ctx.status = '401 Unauthorized'
+    return _api_response(False, "unauthorized", None)
+
+
+def _nickname_error(value):
+    if not isinstance(value, str) or not value.strip():
+        return "昵称不可为空"
+    name = value.strip()
+    weighted_len = 0
+    for ch in name:
+        if "\u4e00" <= ch <= "\u9fff":
+            weighted_len += 2
+        elif ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
+            weighted_len += 1
+        else:
+            return "昵称仅支持中文或英文字母"
+    if weighted_len > 14:
+        return "昵称最多 7 个汉字或 14 个英文字母"
+    return None
+
 
 class WebMessage(ChatMessage):
     def __init__(
@@ -77,6 +140,7 @@ class WebChannel(ChatChannel):
         self.pet_event_queues = {}     # device_id -> deque of event dict
         self._pet_event_lock = threading.Lock()
         self._pet_event_max = 50
+        self._account_cleanup_started = False
 
 
     def _generate_msg_id(self):
@@ -128,6 +192,16 @@ class WebChannel(ChatChannel):
             device_id = context.get("device_id", "")
             if source == "DEVICE" and device_id and reply.content:
                 self._push_chatlog(device_id, "assistant", reply.content)
+            if context.get("user_id", -1) != -1 and reply.content:
+                db.append_chat_message(
+                    context.get("user_id"),
+                    context.get("session_id", ""),
+                    "assistant",
+                    str(reply.content),
+                    "text",
+                    source,
+                    request_id,
+                )
 
             # SSE mode: push done event to SSE queue
             if request_id in self.sse_queues:
@@ -627,6 +701,16 @@ class WebChannel(ChatChannel):
 
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
+                if user_id != -1:
+                    db.append_chat_message(
+                        user_id,
+                        session_id,
+                        "user",
+                        f"[图片]{(' ' + prompt) if prompt else ''}",
+                        "image_url",
+                        source,
+                        request_id,
+                    )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
@@ -688,6 +772,16 @@ class WebChannel(ChatChannel):
 
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
+                if user_id != -1:
+                    db.append_chat_message(
+                        user_id,
+                        session_id,
+                        "user",
+                        f"[图片]{(' ' + prompt) if prompt else ''}",
+                        "image_b64",
+                        source,
+                        request_id,
+                    )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
@@ -745,6 +839,8 @@ class WebChannel(ChatChannel):
             # DEVICE 来源：将用户消息写入聊天记录队列
             if source == "DEVICE" and device_id:
                 self._push_chatlog(device_id, "user", prompt)
+            if user_id != -1:
+                db.append_chat_message(user_id, session_id, "user", prompt, "text", source, request_id)
 
             threading.Thread(target=self._produce_with_logging, args=(context,)).start()
 
@@ -883,6 +979,7 @@ class WebChannel(ChatChannel):
     def startup(self):
         port = conf().get("web_port", 9899)
         db.init_db()
+        self._start_account_cleanup_thread()
 
         # 从磁盘恢复设备注册表
         self._load_device_registry()
@@ -912,6 +1009,7 @@ class WebChannel(ChatChannel):
             '/poll', 'PollHandler',
             '/stream', 'StreamHandler',
             '/chat', 'ChatHandler',
+            '/complaints', 'ComplaintsPageHandler',
             '/config', 'ConfigHandler',
             '/api/skills', 'SkillsHandler',
             '/api/scheduler', 'SchedulerHandler',
@@ -922,6 +1020,16 @@ class WebChannel(ChatChannel):
             '/api/pet/event/poll', 'PetEventPollHandler',
             '/api/pet/event/send', 'PetEventSendHandler',
             '/api/auth/register', 'AuthRegisterHandler',
+            '/api/user/profile', 'UserProfileHandler',
+            '/api/user/nickname', 'UserNicknameHandler',
+            '/api/user/account', 'UserAccountHandler',
+            '/api/feedback', 'FeedbackHandler',
+            '/api/admin/complaints/auth', 'ComplaintAdminAuthHandler',
+            '/api/admin/complaints', 'ComplaintAdminListHandler',
+            '/api/admin/complaints/comment', 'ComplaintAdminCommentHandler',
+            '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
+            '/api/app/version', 'AppVersionHandler',
+            '/api/chat/history', 'ChatHistoryHandler',
             '/api/invite_code', 'InviteCodeHandler',
             '/api/user_behavior', 'UserBehaviorHandler',
             '/api/client/event', 'ClientEventHandler',
@@ -948,6 +1056,30 @@ class WebChannel(ChatChannel):
             server.start()
         except (KeyboardInterrupt, SystemExit):
             server.stop()
+
+    def _start_account_cleanup_thread(self):
+        if self._account_cleanup_started:
+            return
+        self._account_cleanup_started = True
+
+        def _cleanup_loop():
+            from common.utils import expand_path
+            workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+            while True:
+                try:
+                    cleaned = db.cleanup_expired_deleted_accounts(workspace_root)
+                    if cleaned:
+                        logger.info(f"[WebChannel] Cleaned {cleaned} expired deleted accounts")
+                except Exception as e:
+                    logger.warning(f"[WebChannel] Account cleanup failed: {e}")
+                    event_log.log_exception("account_cleanup_failed", e)
+                time.sleep(24 * 60 * 60)
+
+        threading.Thread(
+            target=_cleanup_loop,
+            daemon=True,
+            name="account-cleanup",
+        ).start()
 
     def stop(self):
         if self._http_server:
@@ -995,6 +1127,13 @@ class ChatHandler:
     def GET(self):
         # 正常返回聊天页面
         file_path = os.path.join(os.path.dirname(__file__), 'chat.html')
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+
+class ComplaintsPageHandler:
+    def GET(self):
+        file_path = os.path.join(os.path.dirname(__file__), 'complaints.html')
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
 
@@ -1169,6 +1308,10 @@ class AuthRegisterHandler:
             if not success:
                 event_log.log("auth_fail", reason=action_type, message=msg,
                               phone_number=phone_number, invite_code=invite_code)
+                if action_type == "ACCOUNT_PENDING_DELETION":
+                    return json.dumps({"success": False, "message": msg, "code": 4031, "data": None}, ensure_ascii=False)
+                if action_type == "ACCOUNT_DELETED":
+                    return json.dumps({"success": False, "message": msg, "code": 4032, "data": None}, ensure_ascii=False)
                 return json.dumps({"success": False, "message": msg, "data": None}, ensure_ascii=False)
 
             event_log.log("auth_done", action=action_type,
@@ -1184,6 +1327,267 @@ class AuthRegisterHandler:
                 invite_code=invite_code or "",
             )
             return json.dumps({"success": False, "message": "Server error", "data": None})
+
+
+class UserProfileHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            profile = db.get_user_profile(user["id"])
+            return _api_response(True, "Success", profile)
+        except Exception as e:
+            logger.exception(f"UserProfileHandler error: {e}")
+            event_log.log_exception("user_profile_failed", e, endpoint="/api/user/profile")
+            return _api_response(False, "Server error", None)
+
+
+class UserNicknameHandler:
+    def PUT(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+
+            data = json.loads(web.data() or b"{}")
+            user_nickname = (data.get("userNickname") or "").strip()
+            err = _nickname_error(user_nickname)
+            if err:
+                return _api_response(False, err, None)
+
+            if not db.update_user_nickname(user["id"], user_nickname):
+                return _api_response(False, "用户不存在", None)
+
+            try:
+                from agent.memory.user_cache import update_nickname
+                from common.utils import expand_path
+                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+                update_nickname(workspace_root, f"user_{user['id']}", user_nickname)
+            except Exception as cache_error:
+                logger.warning(f"[UserNicknameHandler] cache update failed: {cache_error}")
+
+            return _api_response(True, "Success", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except Exception as e:
+            logger.exception(f"UserNicknameHandler error: {e}")
+            event_log.log_exception("user_nickname_failed", e, endpoint="/api/user/nickname")
+            return _api_response(False, "Server error", None)
+
+
+class UserAccountHandler:
+    def DELETE(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            db.request_account_deletion(user["id"])
+            return _api_response(True, "Success", None)
+        except Exception as e:
+            logger.exception(f"UserAccountHandler error: {e}")
+            event_log.log_exception("user_account_delete_failed", e, endpoint="/api/user/account")
+            return _api_response(False, "Server error", None)
+
+
+class FeedbackHandler:
+    VALID_TYPES = {"experience", "bug", "suggestion", "other"}
+
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+
+            data = json.loads(web.data() or b"{}")
+            feedback_type = data.get("type")
+            if feedback_type is not None and feedback_type not in self.VALID_TYPES:
+                return _api_response(False, "Invalid feedback type", None)
+
+            description = data.get("description")
+            if not isinstance(description, str) or not description.strip():
+                return _api_response(False, "description is required", None)
+            description = description.strip()
+            if len(description) > 200:
+                return _api_response(False, "description exceeds 200 chars", None)
+
+            images = data.get("images") or []
+            if not isinstance(images, list) or len(images) > 3 or not all(isinstance(item, str) for item in images):
+                return _api_response(False, "images must be a URL list with at most 3 items", None)
+
+            contact = data.get("contact")
+            if contact is not None:
+                if not isinstance(contact, str):
+                    return _api_response(False, "contact must be a string", None)
+                contact = contact.strip()
+                if len(contact) > 50:
+                    return _api_response(False, "contact exceeds 50 chars", None)
+
+            db.create_feedback(user["id"], feedback_type, description, images, contact)
+            return _api_response(True, "Success", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except Exception as e:
+            logger.exception(f"FeedbackHandler error: {e}")
+            event_log.log_exception("feedback_failed", e, endpoint="/api/feedback")
+            return _api_response(False, "Server error", None)
+
+
+class ComplaintAdminAuthHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        if not _admin_authorized():
+            web.ctx.status = '401 Unauthorized'
+            return _api_response(False, "unauthorized", None)
+        return _api_response(True, "Success", {"authorized": True})
+
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        if not _admin_authorized():
+            web.ctx.status = '401 Unauthorized'
+            return _api_response(False, "unauthorized", None)
+        return _api_response(True, "Success", {"authorized": True})
+
+
+class ComplaintAdminListHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            params = web.input(keyword="", status="", order="desc", limit=30, offset=0)
+            repair_status = params.status.strip() if params.status else ""
+            if repair_status and repair_status not in COMPLAINT_FILTER_STATUSES:
+                return _api_response(False, "Invalid repair status", None)
+            data = db.list_feedbacks(
+                keyword=params.keyword.strip() if params.keyword else "",
+                repair_status=repair_status or None,
+                order=params.order,
+                limit=int(params.limit or 30),
+                offset=int(params.offset or 0),
+            )
+            return _api_response(True, "Success", data)
+        except ValueError:
+            return _api_response(False, "Invalid limit or offset", None)
+        except Exception as e:
+            logger.exception(f"ComplaintAdminListHandler error: {e}")
+            event_log.log_exception("complaint_admin_list_failed", e, endpoint="/api/admin/complaints")
+            return _api_response(False, "Server error", None)
+
+
+class ComplaintAdminCommentHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            data = json.loads(web.data() or b"{}")
+            feedback_id = int(data.get("feedbackId") or 0)
+            content = str(data.get("content") or "").strip()
+            if feedback_id <= 0:
+                return _api_response(False, "feedbackId is required", None)
+            if not content:
+                return _api_response(False, "content is required", None)
+            comment = db.add_feedback_comment(feedback_id, content)
+            if not comment:
+                return _api_response(False, "feedback not found", None)
+            return _api_response(True, "Success", comment)
+        except ValueError:
+            return _api_response(False, "Invalid feedbackId", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except Exception as e:
+            logger.exception(f"ComplaintAdminCommentHandler error: {e}")
+            event_log.log_exception("complaint_admin_comment_failed", e, endpoint="/api/admin/complaints/comment")
+            return _api_response(False, "Server error", None)
+
+
+class ComplaintAdminStatusHandler:
+    def PUT(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            data = json.loads(web.data() or b"{}")
+            feedback_id = int(data.get("feedbackId") or 0)
+            repair_status = str(data.get("status") or "").strip()
+            if feedback_id <= 0:
+                return _api_response(False, "feedbackId is required", None)
+            if repair_status not in REPAIR_STATUSES:
+                return _api_response(False, "Invalid repair status", None)
+            if not db.update_feedback_repair_status(feedback_id, repair_status):
+                return _api_response(False, "feedback not found", None)
+            return _api_response(True, "Success", None)
+        except ValueError:
+            return _api_response(False, "Invalid feedbackId", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except Exception as e:
+            logger.exception(f"ComplaintAdminStatusHandler error: {e}")
+            event_log.log_exception("complaint_admin_status_failed", e, endpoint="/api/admin/complaints/status")
+            return _api_response(False, "Server error", None)
+
+
+class AppVersionHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            params = web.input(platform=None, currentVersion=None)
+            if params.platform not in ("ios", "android"):
+                return _api_response(False, "Invalid platform", None)
+            if not params.currentVersion:
+                return _api_response(False, "currentVersion is required", None)
+            return _api_response(True, "Success", {
+                "hasUpdate": False,
+                "latestVersion": "alpha",
+                "storeUrl": "",
+            })
+        except Exception as e:
+            logger.exception(f"AppVersionHandler error: {e}")
+            event_log.log_exception("app_version_failed", e, endpoint="/api/app/version")
+            return _api_response(False, "Server error", None)
+
+
+class ChatHistoryHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            params = web.input(offset=None, limit=50)
+            offset = int(params.offset) if params.offset not in (None, "", "0") else None
+            limit = int(params.limit or 50)
+            return _api_response(True, "Success", db.list_chat_messages(user["id"], offset, limit))
+        except ValueError:
+            return _api_response(False, "Invalid offset or limit", None)
+        except Exception as e:
+            logger.exception(f"ChatHistoryHandler error: {e}")
+            event_log.log_exception("chat_history_failed", e, endpoint="/api/chat/history")
+            return _api_response(False, "Server error", None)
 
 
 class InviteCodeHandler:
@@ -1530,4 +1934,3 @@ class WeatherHandler:
                 lon=locals().get("lon", "") or "",
             )
             return json.dumps({"success": False, "message": str(e), "data": None}, ensure_ascii=False)
-
