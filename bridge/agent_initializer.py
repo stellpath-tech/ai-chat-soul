@@ -247,15 +247,10 @@ class AgentInitializer:
                     now = datetime.datetime.now()
                     timezone_name = "UTC"
             else:
-                now = datetime.datetime.now()
-                # Get local timezone info
-                try:
-                    offset = -time.timezone if not time.daylight else -time.altzone
-                    hours = offset // 3600
-                    minutes = (offset % 3600) // 60
-                    timezone_name = f"UTC{hours:+03d}:{minutes:02d}" if minutes else f"UTC{hours:+03d}"
-                except Exception:
-                    timezone_name = "UTC"
+                # 无前端 timezone 信息时，默认用中国标准时间（UTC+8）
+                cst = datetime.timezone(datetime.timedelta(hours=8))
+                now = datetime.datetime.now(cst)
+                timezone_name = "Asia/Shanghai"
 
             # Chinese weekday mapping
             weekday_map = {
