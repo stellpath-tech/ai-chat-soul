@@ -30,6 +30,10 @@ except Exception:
             pass
     event_log = _NoopEventLog()
 
+COMPLAINT_ADMIN_PASSCODE = "320e0ec38f2cc0e2ea9697a52693b1c44089f7b017e0540125bdfffa03bf298e"
+REPAIR_STATUSES = {"需要修复", "已修复", "无需修复"}
+COMPLAINT_FILTER_STATUSES = REPAIR_STATUSES | {"未标记"}
+
 
 def _api_response(success, message, data=None, **extra):
     body = {"success": success, "message": message, "data": data}
@@ -43,6 +47,34 @@ def _auth_user():
     if not user:
         return None
     return user
+
+
+def _admin_passcode_from_request():
+    header_passcode = web.ctx.env.get("HTTP_X_ADMIN_PASSCODE", "").strip()
+    if header_passcode:
+        return header_passcode
+    try:
+        params = web.input(passcode="")
+        if params.passcode:
+            return params.passcode.strip()
+    except Exception:
+        pass
+    try:
+        data = json.loads(web.data() or b"{}")
+        return str(data.get("passcode") or "").strip()
+    except Exception:
+        return ""
+
+
+def _admin_authorized():
+    return _admin_passcode_from_request() == COMPLAINT_ADMIN_PASSCODE
+
+
+def _require_admin():
+    if _admin_authorized():
+        return None
+    web.ctx.status = '401 Unauthorized'
+    return _api_response(False, "unauthorized", None)
 
 
 def _nickname_error(value):
@@ -977,6 +1009,7 @@ class WebChannel(ChatChannel):
             '/poll', 'PollHandler',
             '/stream', 'StreamHandler',
             '/chat', 'ChatHandler',
+            '/complaints', 'ComplaintsPageHandler',
             '/config', 'ConfigHandler',
             '/api/skills', 'SkillsHandler',
             '/api/scheduler', 'SchedulerHandler',
@@ -991,6 +1024,10 @@ class WebChannel(ChatChannel):
             '/api/user/nickname', 'UserNicknameHandler',
             '/api/user/account', 'UserAccountHandler',
             '/api/feedback', 'FeedbackHandler',
+            '/api/admin/complaints/auth', 'ComplaintAdminAuthHandler',
+            '/api/admin/complaints', 'ComplaintAdminListHandler',
+            '/api/admin/complaints/comment', 'ComplaintAdminCommentHandler',
+            '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
             '/api/app/version', 'AppVersionHandler',
             '/api/chat/history', 'ChatHistoryHandler',
             '/api/invite_code', 'InviteCodeHandler',
@@ -1090,6 +1127,13 @@ class ChatHandler:
     def GET(self):
         # 正常返回聊天页面
         file_path = os.path.join(os.path.dirname(__file__), 'chat.html')
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+
+class ComplaintsPageHandler:
+    def GET(self):
+        file_path = os.path.join(os.path.dirname(__file__), 'complaints.html')
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
 
@@ -1398,6 +1442,109 @@ class FeedbackHandler:
         except Exception as e:
             logger.exception(f"FeedbackHandler error: {e}")
             event_log.log_exception("feedback_failed", e, endpoint="/api/feedback")
+            return _api_response(False, "Server error", None)
+
+
+class ComplaintAdminAuthHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        if not _admin_authorized():
+            web.ctx.status = '401 Unauthorized'
+            return _api_response(False, "unauthorized", None)
+        return _api_response(True, "Success", {"authorized": True})
+
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        if not _admin_authorized():
+            web.ctx.status = '401 Unauthorized'
+            return _api_response(False, "unauthorized", None)
+        return _api_response(True, "Success", {"authorized": True})
+
+
+class ComplaintAdminListHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            params = web.input(keyword="", status="", order="desc", limit=30, offset=0)
+            repair_status = params.status.strip() if params.status else ""
+            if repair_status and repair_status not in COMPLAINT_FILTER_STATUSES:
+                return _api_response(False, "Invalid repair status", None)
+            data = db.list_feedbacks(
+                keyword=params.keyword.strip() if params.keyword else "",
+                repair_status=repair_status or None,
+                order=params.order,
+                limit=int(params.limit or 30),
+                offset=int(params.offset or 0),
+            )
+            return _api_response(True, "Success", data)
+        except ValueError:
+            return _api_response(False, "Invalid limit or offset", None)
+        except Exception as e:
+            logger.exception(f"ComplaintAdminListHandler error: {e}")
+            event_log.log_exception("complaint_admin_list_failed", e, endpoint="/api/admin/complaints")
+            return _api_response(False, "Server error", None)
+
+
+class ComplaintAdminCommentHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            data = json.loads(web.data() or b"{}")
+            feedback_id = int(data.get("feedbackId") or 0)
+            content = str(data.get("content") or "").strip()
+            if feedback_id <= 0:
+                return _api_response(False, "feedbackId is required", None)
+            if not content:
+                return _api_response(False, "content is required", None)
+            comment = db.add_feedback_comment(feedback_id, content)
+            if not comment:
+                return _api_response(False, "feedback not found", None)
+            return _api_response(True, "Success", comment)
+        except ValueError:
+            return _api_response(False, "Invalid feedbackId", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except Exception as e:
+            logger.exception(f"ComplaintAdminCommentHandler error: {e}")
+            event_log.log_exception("complaint_admin_comment_failed", e, endpoint="/api/admin/complaints/comment")
+            return _api_response(False, "Server error", None)
+
+
+class ComplaintAdminStatusHandler:
+    def PUT(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            data = json.loads(web.data() or b"{}")
+            feedback_id = int(data.get("feedbackId") or 0)
+            repair_status = str(data.get("status") or "").strip()
+            if feedback_id <= 0:
+                return _api_response(False, "feedbackId is required", None)
+            if repair_status not in REPAIR_STATUSES:
+                return _api_response(False, "Invalid repair status", None)
+            if not db.update_feedback_repair_status(feedback_id, repair_status):
+                return _api_response(False, "feedback not found", None)
+            return _api_response(True, "Success", None)
+        except ValueError:
+            return _api_response(False, "Invalid feedbackId", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except Exception as e:
+            logger.exception(f"ComplaintAdminStatusHandler error: {e}")
+            event_log.log_exception("complaint_admin_status_failed", e, endpoint="/api/admin/complaints/status")
             return _api_response(False, "Server error", None)
 
 

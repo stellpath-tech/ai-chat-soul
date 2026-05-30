@@ -81,9 +81,21 @@ def init_db():
           description TEXT NOT NULL,
           images TEXT NOT NULL DEFAULT '[]',
           contact VARCHAR(255) DEFAULT NULL,
+          repair_status VARCHAR(32) NOT NULL DEFAULT '未标记',
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_feedback_comment (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          feedback_id BIGINT NOT NULL,
+          content TEXT NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_feedback_comment_feedback_id ON user_feedback_comment(feedback_id, id)")
 
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_chat_message (
@@ -294,6 +306,12 @@ def _purge_deleted_user_data(cursor, user_id, deleted_at):
     user_key = f"user_{user_id}"
 
     _delete_from_existing_table(cursor, "user_chat_message", "user_id = ?", (user_id,))
+    _delete_from_existing_table(
+        cursor,
+        "user_feedback_comment",
+        "feedback_id IN (SELECT id FROM user_feedback WHERE user_id = ?)",
+        (user_id,),
+    )
     _delete_from_existing_table(cursor, "user_feedback", "user_id = ?", (user_id,))
     _delete_from_existing_table(cursor, "user_behavior_log", "user_id = ?", (user_id,))
     _delete_from_existing_table(cursor, "thing_memory", "user_id = ?", (user_key,))
@@ -346,10 +364,147 @@ def create_feedback(user_id, feedback_type, description, images, contact):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_db()) as conn:
         conn.execute("""
-            INSERT INTO user_feedback (user_id, feedback_type, description, images, contact, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (user_id, feedback_type, description, json.dumps(images or [], ensure_ascii=False), contact, now_str))
+            INSERT INTO user_feedback (user_id, feedback_type, description, images, contact, repair_status, updated_at, created_at)
+            VALUES (?, ?, ?, ?, ?, '未标记', ?, ?)
+        """, (user_id, feedback_type, description, json.dumps(images or [], ensure_ascii=False), contact, now_str, now_str))
         conn.commit()
+
+def list_feedbacks(keyword=None, repair_status=None, order="desc", limit=30, offset=0):
+    safe_limit = max(1, min(int(limit or 30), 100))
+    safe_offset = max(0, int(offset or 0))
+    sort = "ASC" if str(order).lower() == "asc" else "DESC"
+    where = []
+    params = []
+
+    if keyword:
+        where.append("(f.description LIKE ? OR f.contact LIKE ?)")
+        like = f"%{keyword.strip()}%"
+        params.extend([like, like])
+    if repair_status:
+        where.append("f.repair_status = ?")
+        params.append(repair_status)
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    with closing(get_db()) as conn:
+        rows = conn.execute(f"""
+            SELECT
+                f.id,
+                f.user_id,
+                u.phone_number,
+                f.feedback_type,
+                f.description,
+                f.images,
+                f.contact,
+                f.repair_status,
+                f.updated_at,
+                f.created_at,
+                COUNT(c.id) AS comment_count
+            FROM user_feedback f
+            LEFT JOIN user u ON u.id = f.user_id
+            LEFT JOIN user_feedback_comment c ON c.feedback_id = f.id
+            {where_sql}
+            GROUP BY f.id
+            ORDER BY f.created_at {sort}, f.id {sort}
+            LIMIT ? OFFSET ?
+        """, params + [safe_limit, safe_offset]).fetchall()
+
+        total_row = conn.execute(f"""
+            SELECT COUNT(*) AS total
+            FROM user_feedback f
+            LEFT JOIN user u ON u.id = f.user_id
+            {where_sql}
+        """, params).fetchone()
+
+        status_rows = conn.execute("""
+            SELECT repair_status, COUNT(*) AS count
+            FROM user_feedback
+            GROUP BY repair_status
+        """).fetchall()
+
+        feedback_ids = [row["id"] for row in rows]
+        comments_by_feedback = _load_feedback_comments(conn, feedback_ids)
+
+        return {
+            "items": [_format_feedback_row(row, comments_by_feedback.get(row["id"], [])) for row in rows],
+            "total": total_row["total"] if total_row else 0,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "statusCounts": {row["repair_status"]: row["count"] for row in status_rows},
+        }
+
+def update_feedback_repair_status(feedback_id, repair_status):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_db()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE user_feedback
+            SET repair_status = ?, updated_at = ?
+            WHERE id = ?
+        """, (repair_status, now_str, feedback_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+def add_feedback_comment(feedback_id, content):
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_db()) as conn:
+        cursor = conn.cursor()
+        exists = cursor.execute("SELECT 1 FROM user_feedback WHERE id = ?", (feedback_id,)).fetchone()
+        if not exists:
+            return None
+        cursor.execute("""
+            INSERT INTO user_feedback_comment (feedback_id, content, created_at)
+            VALUES (?, ?, ?)
+        """, (feedback_id, content, now_str))
+        conn.execute("UPDATE user_feedback SET updated_at = ? WHERE id = ?", (now_str, feedback_id))
+        comment_id = cursor.lastrowid
+        conn.commit()
+        return {
+            "id": comment_id,
+            "feedbackId": feedback_id,
+            "content": content,
+            "createdAt": now_str,
+        }
+
+def _load_feedback_comments(conn, feedback_ids):
+    if not feedback_ids:
+        return {}
+    placeholders = ",".join("?" for _ in feedback_ids)
+    rows = conn.execute(f"""
+        SELECT id, feedback_id, content, created_at
+        FROM user_feedback_comment
+        WHERE feedback_id IN ({placeholders})
+        ORDER BY id ASC
+    """, feedback_ids).fetchall()
+    comments = {}
+    for row in rows:
+        comments.setdefault(row["feedback_id"], []).append({
+            "id": row["id"],
+            "feedbackId": row["feedback_id"],
+            "content": row["content"],
+            "createdAt": row["created_at"],
+        })
+    return comments
+
+def _format_feedback_row(row, comments):
+    try:
+        images = json.loads(row["images"] or "[]")
+    except Exception:
+        images = []
+    return {
+        "id": row["id"],
+        "userId": row["user_id"],
+        "phoneNumber": row["phone_number"] or "",
+        "type": row["feedback_type"] or "",
+        "description": row["description"],
+        "images": images,
+        "contact": row["contact"] or "",
+        "repairStatus": row["repair_status"],
+        "commentCount": row["comment_count"],
+        "comments": comments,
+        "updatedAt": row["updated_at"],
+        "createdAt": row["created_at"],
+    }
 
 def append_chat_message(user_id, session_id, role, content, message_type="text", source="APP", request_id=""):
     if not user_id or user_id == -1 or not content:
