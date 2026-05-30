@@ -117,7 +117,7 @@ def add_memory(
     source_text: Optional[str] = None,
 ) -> None:
     import datetime as _dt
-    now = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     path = db_path(workspace_root)
     mid = str(uuid.uuid4())
     with _conn(path) as conn:
@@ -155,7 +155,7 @@ def archive_messages(workspace_root: str, user_id: str, messages: list) -> None:
     if not messages:
         return
     import datetime as _dt
-    now = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     path = db_path(workspace_root)
     rows = []
     for m in messages:

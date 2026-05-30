@@ -89,7 +89,7 @@ def _save_to_db(workspace_root: str, data: dict) -> None:
     """Upsert data dict into current_setting table."""
     import datetime as _dt
     from agent.memory.thing_memory.store import _conn, db_path
-    now = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
     uid = data["user_id"]
     conv = json.dumps(data.get("conversation", []), ensure_ascii=False)
     mem = json.dumps(data.get("memory", []), ensure_ascii=False)
