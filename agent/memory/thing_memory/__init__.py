@@ -78,7 +78,13 @@ def _extract_worker(
         if not msgs_to_extract:
             return
 
-        extracted, nickname = extract_memories(msgs_to_extract, api_key, api_base, model)
+        # 注入已有记忆，让抽取器在生成阶段就避开重复
+        existing = get_recent_memories(workspace_root, user_id, session_id, limit=40)
+        existing_events = [m["event"] for m in existing]
+
+        extracted, nickname = extract_memories(
+            msgs_to_extract, api_key, api_base, model, existing_events=existing_events
+        )
         logger.info(f"[ThingMemory] user={user_id} extracted={len(extracted)} nickname={nickname!r}")
 
         # 写入新记忆

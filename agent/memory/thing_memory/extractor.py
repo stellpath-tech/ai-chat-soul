@@ -41,6 +41,7 @@ EXTRACT_SYSTEM = """你是一个"用户事件记忆抽取器"。
 8. time 用绝对日期（YYYY-MM-DD），相对时间（昨天/上周等）结合当前日期转换
 9. 无法准确转换则 time 用当前日期，event 保留相对表达
 10. 没有值得记忆的事件，memories 输出空数组
+11. 【去重】下方"已记忆事件"列出用户此前已记录的事件。不要再次抽取与其相同或语义重复的事件（即使本轮用户重复提起或换了说法）；只抽取其中尚未出现的新事件
 
 昵称规则：
 - 如果用户明确表达希望被叫某个名字（例如"叫我小明""我的名字是XX""你可以叫我XX"），提取该名字填入 nickname
@@ -113,9 +114,12 @@ def extract_memories(
     api_key: str,
     api_base: str,
     model: str,
+    existing_events: Optional[list[str]] = None,
 ) -> tuple[list[dict], Optional[str]]:
     """Call LLM to extract memory events and optional nickname.
     Returns (memories, nickname). nickname is None if not mentioned.
+
+    existing_events: 用户此前已记录的事件描述列表，注入提示词让抽取器避免重复抽取。
     """
     if not api_key or not user_messages:
         return [], None
@@ -127,7 +131,14 @@ def extract_memories(
 
     today = _current_date()
     msgs_text = "\n\n".join(f"用户消息 {i+1}：{m}" for i, m in enumerate(user_messages))
-    user_prompt = f"当前日期：{today}\n\n{msgs_text}"
+
+    existing_block = ""
+    if existing_events:
+        existing_lines = "\n".join(f"- {e}" for e in existing_events if isinstance(e, str) and e.strip())
+        if existing_lines:
+            existing_block = f"\n\n已记忆事件（请勿重复抽取）：\n{existing_lines}"
+
+    user_prompt = f"当前日期：{today}{existing_block}\n\n本轮待抽取的新消息：\n{msgs_text}"
 
     payload = {
         "model": model,
