@@ -116,7 +116,17 @@ class OpenAICompatibleBot:
             # Add max_tokens if specified
             if kwargs.get("max_tokens"):
                 request_params["max_tokens"] = kwargs["max_tokens"]
-            
+
+            # Disable thinking mode for Qwen3 hybrid models (DashScope compatible-mode).
+            # These default to thinking ON, but we discard reasoning_content downstream,
+            # so the thinking tokens are pure cost + latency. Pass enable_thinking=False
+            # via extra_body. Allow override through kwargs/api_config when needed.
+            _model_name = str(request_params.get("model", ""))
+            if _model_name.startswith(("qwen", "qwq", "qvq")):
+                _enable_thinking = kwargs.get("enable_thinking",
+                                              api_config.get("enable_thinking", False))
+                request_params["extra_body"] = {"enable_thinking": _enable_thinking}
+
             # Add tools if provided
             if tools:
                 request_params["tools"] = tools
