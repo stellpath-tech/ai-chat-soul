@@ -662,6 +662,19 @@ class AgentBridge:
             else:
                 agent.runtime_info.pop("request_timezone", None)
 
+            # 每轮从磁盘缓存读取最新昵称注入 runtime_info
+            if session_id:
+                try:
+                    from agent.memory.user_cache import get as _cache_get
+                    _cached = _cache_get(self.workspace_root, session_id)
+                    _nick = _cached.get("nickname") if _cached else None
+                    if _nick:
+                        agent.runtime_info["user_nickname"] = _nick
+                    else:
+                        agent.runtime_info.pop("user_nickname", None)
+                except Exception:
+                    pass
+
             # 前端在 GET /api/weather 时已拿到 sensor_label，直接注入（由 enable_sensor_label 开关控制）
             from config import conf as _conf
             if _conf().get("enable_sensor_label", False):

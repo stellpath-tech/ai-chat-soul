@@ -122,6 +122,9 @@ class Agent:
                 sensor_label = self.runtime_info.get("sensor_label", "") if self.runtime_info else ""
                 if sensor_label:
                     state_lines.append(f"传感器：{sensor_label}")
+                user_nickname = self.runtime_info.get("user_nickname", "") if self.runtime_info else ""
+                if user_nickname:
+                    state_lines.append(f"用户昵称：{user_nickname}")
                 time_block = "\n".join(state_lines)
                 prompt = (prompt + "\n\n" + time_block) if prompt else time_block
             except Exception as e:
