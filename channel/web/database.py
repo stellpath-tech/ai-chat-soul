@@ -4,7 +4,7 @@ import time
 import json
 import uuid
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from contextlib import closing
 
 # Store DB in workspace data dir
@@ -14,12 +14,19 @@ DB_PATH = os.path.join(DB_DIR, 'soul.db')
 DEFAULT_USER_NICKNAME = "宝宝"
 DEFAULT_BEAR_NICKNAME = "满仓"
 MAX_CHAT_MESSAGES_PER_USER = 1000
+APP_TIMEZONE = timezone(timedelta(hours=8))
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+def _now_app_timezone():
+    return datetime.now(APP_TIMEZONE).replace(tzinfo=None)
+
+def _now_app_timezone_str():
+    return _now_app_timezone().strftime("%Y-%m-%d %H:%M:%S")
 
 def init_db():
     with closing(get_db()) as conn:
@@ -104,12 +111,16 @@ def init_db():
           session_id VARCHAR(255) NOT NULL DEFAULT '',
           role VARCHAR(32) NOT NULL,
           content TEXT NOT NULL,
+          image_url TEXT NOT NULL DEFAULT '',
           message_type VARCHAR(32) NOT NULL DEFAULT 'text',
           source VARCHAR(32) NOT NULL DEFAULT 'APP',
           request_id VARCHAR(64) NOT NULL DEFAULT '',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        _ensure_columns(cursor, "user_chat_message", {
+            "image_url": "TEXT NOT NULL DEFAULT ''",
+        })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_chat_message_user_id_id ON user_chat_message(user_id, id)")
         
         conn.commit()
@@ -134,7 +145,7 @@ def check_and_use_invite_code(phone_number, code):
             return False, "无效的内测码", "invite_code_invalid"
             
         expire_at = datetime.strptime(row['expire_at'], "%Y-%m-%d %H:%M:%S")
-        if datetime.now() > expire_at:
+        if _now_app_timezone() > expire_at:
             return False, "内测码已过期", "invite_code_expired"
             
         user_group = row['user_group']
@@ -162,7 +173,7 @@ def register_or_login(phone_number, invite_code):
 
     user_group = msg_or_group
     token = generate_token()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
 
     with closing(get_db()) as conn:
         cursor = conn.cursor()
@@ -234,7 +245,7 @@ def get_user_profile(user_id):
         }
 
 def update_user_nickname(user_id, user_nickname):
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT nickname, used_nickname FROM user WHERE id = ?", (user_id,))
@@ -258,7 +269,7 @@ def update_user_nickname(user_id, user_nickname):
         return True
 
 def request_account_deletion(user_id):
-    now = datetime.now()
+    now = _now_app_timezone()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     deadline = _add_business_days(now, 15).strftime("%Y-%m-%d %H:%M:%S")
     with closing(get_db()) as conn:
@@ -275,7 +286,7 @@ def request_account_deletion(user_id):
     return deadline
 
 def cleanup_expired_deleted_accounts(workspace_root=None, now=None):
-    now = now or datetime.now()
+    now = now or _now_app_timezone()
     now_str = now.strftime("%Y-%m-%d %H:%M:%S")
     cleaned_user_ids = []
 
@@ -361,7 +372,7 @@ def _add_business_days(start, days):
     return current
 
 def create_feedback(user_id, feedback_type, description, images, contact):
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         conn.execute("""
             INSERT INTO user_feedback (user_id, feedback_type, description, images, contact, repair_status, updated_at, created_at)
@@ -434,7 +445,7 @@ def list_feedbacks(keyword=None, repair_status=None, order="desc", limit=30, off
         }
 
 def update_feedback_repair_status(feedback_id, repair_status):
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -446,7 +457,7 @@ def update_feedback_repair_status(feedback_id, repair_status):
         return cursor.rowcount > 0
 
 def add_feedback_comment(feedback_id, content):
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         cursor = conn.cursor()
         exists = cursor.execute("SELECT 1 FROM user_feedback WHERE id = ?", (feedback_id,)).fetchone()
@@ -506,17 +517,19 @@ def _format_feedback_row(row, comments):
         "createdAt": row["created_at"],
     }
 
-def append_chat_message(user_id, session_id, role, content, message_type="text", source="APP", request_id=""):
-    if not user_id or user_id == -1 or not content:
+def append_chat_message(user_id, session_id, role, content, message_type="text", source="APP", request_id="", image_url=""):
+    content_text = content or ""
+    image_url_text = image_url or ""
+    if not user_id or user_id == -1 or (not content_text and not image_url_text):
         return None
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO user_chat_message
-            (user_id, session_id, role, content, message_type, source, request_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, session_id or "", role, content, message_type, source or "APP", request_id or "", now_str))
+            (user_id, session_id, role, content, image_url, message_type, source, request_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, session_id or "", role, content_text, image_url_text, message_type, source or "APP", request_id or "", now_str))
         message_id = cursor.lastrowid
         cursor.execute("""
             DELETE FROM user_chat_message
@@ -541,7 +554,7 @@ def list_chat_messages(user_id, offset=None, limit=50):
     params.append(safe_limit)
     with closing(get_db()) as conn:
         rows = conn.execute(f"""
-            SELECT id, role, content, message_type, source, request_id, created_at
+            SELECT id, role, content, image_url, message_type, source, request_id, created_at
             FROM user_chat_message
             WHERE {where}
             ORDER BY id DESC
@@ -563,6 +576,7 @@ def list_chat_messages(user_id, offset=None, limit=50):
                     "id": msg["id"],
                     "role": msg["role"],
                     "content": msg["content"],
+                    "imageUrl": msg["image_url"] or "",
                     "messageType": msg["message_type"],
                     "source": msg["source"],
                     "requestId": msg["request_id"],
@@ -585,7 +599,7 @@ def create_invite_code(code, expire_at_ms):
         user_group = 2 
         
     expire_at_str = datetime.fromtimestamp(expire_at_ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = _now_app_timezone_str()
     
     with closing(get_db()) as conn:
         cursor = conn.cursor()
