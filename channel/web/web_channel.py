@@ -706,11 +706,22 @@ class WebChannel(ChatChannel):
                         user_id,
                         session_id,
                         "user",
-                        f"[图片]{(' ' + prompt) if prompt else ''}",
+                        "",
                         "image_url",
                         source,
                         request_id,
+                        image_url_input,
                     )
+                    if prompt and prompt.strip():
+                        db.append_chat_message(
+                            user_id,
+                            session_id,
+                            "user",
+                            prompt,
+                            "text",
+                            source,
+                            request_id,
+                        )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
