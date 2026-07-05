@@ -192,8 +192,9 @@ class WebChannel(ChatChannel):
             device_id = context.get("device_id", "")
             if source == "DEVICE" and device_id and reply.content:
                 self._push_chatlog(device_id, "assistant", reply.content)
+            message_id = None
             if context.get("user_id", -1) != -1 and reply.content:
-                db.append_chat_message(
+                message_id = db.append_chat_message(
                     context.get("user_id"),
                     context.get("session_id", ""),
                     "assistant",
@@ -210,7 +211,8 @@ class WebChannel(ChatChannel):
                     "type": "done",
                     "content": content,
                     "request_id": request_id,
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "message_id": message_id
                 })
                 logger.debug(f"SSE done sent for request {request_id}")
                 return
@@ -640,6 +642,7 @@ class WebChannel(ChatChannel):
             use_sse = json_data.get('stream', True)
             timezone     = json_data.get('timezone')
             sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传
+            db.record_user_timezone_async(user_id, timezone)
 
             request_id = self._generate_request_id()
             self.request_to_session[request_id] = session_id
@@ -652,6 +655,7 @@ class WebChannel(ChatChannel):
 
             msg = WebMessage(self._generate_msg_id(), prompt or image_b64 or image_url_input)
             msg.from_user_id = session_id
+            message_id = None
 
             # ---------- 图片消息（OSS URL）----------
             if image_url_input and not image_b64:
@@ -702,7 +706,7 @@ class WebChannel(ChatChannel):
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
                 if user_id != -1:
-                    db.append_chat_message(
+                    message_id = db.append_chat_message(
                         user_id,
                         session_id,
                         "user",
@@ -724,7 +728,12 @@ class WebChannel(ChatChannel):
                         )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
-                return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
+                return json.dumps({
+                    "status": "success",
+                    "request_id": request_id,
+                    "stream": use_sse,
+                    "message_id": message_id
+                })
 
             # ---------- 图片消息（base64）----------
             if image_b64:
@@ -784,7 +793,7 @@ class WebChannel(ChatChannel):
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
                 if user_id != -1:
-                    db.append_chat_message(
+                    message_id = db.append_chat_message(
                         user_id,
                         session_id,
                         "user",
@@ -795,7 +804,12 @@ class WebChannel(ChatChannel):
                     )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
-                return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
+                return json.dumps({
+                    "status": "success",
+                    "request_id": request_id,
+                    "stream": use_sse,
+                    "message_id": message_id
+                })
 
             # ---------- 文本消息 ----------
             trigger_prefixs = conf().get("single_chat_prefix", [""])
@@ -851,11 +865,16 @@ class WebChannel(ChatChannel):
             if source == "DEVICE" and device_id:
                 self._push_chatlog(device_id, "user", prompt)
             if user_id != -1:
-                db.append_chat_message(user_id, session_id, "user", prompt, "text", source, request_id)
+                message_id = db.append_chat_message(user_id, session_id, "user", prompt, "text", source, request_id)
 
             threading.Thread(target=self._produce_with_logging, args=(context,)).start()
 
-            return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
+            return json.dumps({
+                "status": "success",
+                "request_id": request_id,
+                "stream": use_sse,
+                "message_id": message_id
+            })
 
         except Exception as e:
             logger.exception(f"Error processing message: {e}")
@@ -1041,6 +1060,7 @@ class WebChannel(ChatChannel):
             '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
             '/api/app/version', 'AppVersionHandler',
             '/api/chat/history', 'ChatHistoryHandler',
+            '/api/diary', 'DiaryHandler',
             '/api/invite_code', 'InviteCodeHandler',
             '/api/user_behavior', 'UserBehaviorHandler',
             '/api/client/event', 'ClientEventHandler',
@@ -1598,6 +1618,27 @@ class ChatHistoryHandler:
         except Exception as e:
             logger.exception(f"ChatHistoryHandler error: {e}")
             event_log.log_exception("chat_history_failed", e, endpoint="/api/chat/history")
+            return _api_response(False, "Server error", None)
+
+
+class DiaryHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            params = web.input(ts=None)
+            if params.ts in (None, ""):
+                return _api_response(False, "ts is required", None)
+            return _api_response(True, "Success", db.get_user_diary_detail(user["id"], int(params.ts)))
+        except ValueError:
+            return _api_response(False, "Invalid ts", None)
+        except Exception as e:
+            logger.exception(f"DiaryHandler error: {e}")
+            event_log.log_exception("diary_detail_failed", e, endpoint="/api/diary")
             return _api_response(False, "Server error", None)
 
 
