@@ -4,8 +4,13 @@ import time
 import json
 import uuid
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 # Store DB in workspace data dir
 DB_DIR = os.path.expanduser('~/cow/data')
@@ -15,6 +20,9 @@ DEFAULT_USER_NICKNAME = "宝宝"
 DEFAULT_BEAR_NICKNAME = "满仓"
 MAX_CHAT_MESSAGES_PER_USER = 1000
 APP_TIMEZONE = timezone(timedelta(hours=8))
+DIARY_STATES = {"GENERATING", "DONE", "SKIPPED"}
+_USER_TIMEZONE_CACHE = {}
+_USER_TIMEZONE_CACHE_LOCK = threading.Lock()
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -42,6 +50,9 @@ def init_db():
           nickname VARCHAR(255) DEFAULT NULL,
           used_nickname TEXT NOT NULL DEFAULT '[]',
           account_status VARCHAR(32) NOT NULL DEFAULT 'active',
+          tz_iana VARCHAR(255) NOT NULL DEFAULT 'Asia/Shanghai',
+          tz_offset_min INTEGER NOT NULL DEFAULT 480,
+          tz_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           deletion_requested_at DATETIME DEFAULT NULL,
           deletion_deadline DATETIME DEFAULT NULL,
           deleted_at DATETIME DEFAULT NULL,
@@ -53,6 +64,9 @@ def init_db():
             "nickname": "VARCHAR(255) DEFAULT NULL",
             "used_nickname": "TEXT NOT NULL DEFAULT '[]'",
             "account_status": "VARCHAR(32) NOT NULL DEFAULT 'active'",
+            "tz_iana": "VARCHAR(255) NOT NULL DEFAULT 'Asia/Shanghai'",
+            "tz_offset_min": "INTEGER NOT NULL DEFAULT 480",
+            "tz_updated_at": "DATETIME DEFAULT NULL",
             "deletion_requested_at": "DATETIME DEFAULT NULL",
             "deletion_deadline": "DATETIME DEFAULT NULL",
             "deleted_at": "DATETIME DEFAULT NULL",
@@ -113,6 +127,9 @@ def init_db():
           content TEXT NOT NULL,
           image_url TEXT NOT NULL DEFAULT '',
           message_type VARCHAR(32) NOT NULL DEFAULT 'text',
+          weather_text VARCHAR(255) NOT NULL DEFAULT '',
+          diary_title VARCHAR(255) NOT NULL DEFAULT '',
+          diary_summary TEXT NOT NULL DEFAULT '',
           source VARCHAR(32) NOT NULL DEFAULT 'APP',
           request_id VARCHAR(64) NOT NULL DEFAULT '',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -120,8 +137,38 @@ def init_db():
         ''')
         _ensure_columns(cursor, "user_chat_message", {
             "image_url": "TEXT NOT NULL DEFAULT ''",
+            "weather_text": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "diary_title": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "diary_summary": "TEXT NOT NULL DEFAULT ''",
         })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_chat_message_user_id_id ON user_chat_message(user_id, id)")
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_diary (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id BIGINT NOT NULL,
+          diary_date VARCHAR(10) NOT NULL,
+          state VARCHAR(32) NOT NULL DEFAULT 'GENERATING',
+          title VARCHAR(255) NOT NULL DEFAULT '',
+          content TEXT NOT NULL DEFAULT '',
+          summary TEXT NOT NULL DEFAULT '',
+          image_urls TEXT NOT NULL DEFAULT '[]',
+          weather_text VARCHAR(255) NOT NULL DEFAULT '',
+          generated_at DATETIME DEFAULT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, diary_date)
+        )
+        ''')
+        _ensure_columns(cursor, "user_diary", {
+            "title": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "content": "TEXT NOT NULL DEFAULT ''",
+            "summary": "TEXT NOT NULL DEFAULT ''",
+            "image_urls": "TEXT NOT NULL DEFAULT '[]'",
+            "weather_text": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "generated_at": "DATETIME DEFAULT NULL",
+        })
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_diary_user_state_date ON user_diary(user_id, state, diary_date)")
         
         conn.commit()
 
@@ -229,6 +276,67 @@ def get_active_user_by_token(token):
         return None
     return user
 
+def record_user_timezone_async(user_id, timezone_payload):
+    profile = _normalize_user_timezone(timezone_payload)
+    if not user_id or user_id == -1 or not profile:
+        return False
+
+    cache_key = (profile["tz_iana"], profile["tz_offset_min"])
+    with _USER_TIMEZONE_CACHE_LOCK:
+        if _USER_TIMEZONE_CACHE.get(user_id) == cache_key:
+            return False
+        _USER_TIMEZONE_CACHE[user_id] = cache_key
+
+    threading.Thread(
+        target=_write_user_timezone_with_cache_guard,
+        args=(user_id, profile, cache_key),
+        daemon=True,
+        name="user-timezone-update",
+    ).start()
+    return True
+
+def _normalize_user_timezone(timezone_payload):
+    if not isinstance(timezone_payload, dict):
+        return None
+
+    tz_iana = str(timezone_payload.get("tz_iana") or "").strip()
+    tz_offset_min = timezone_payload.get("tz_offset_min")
+    if not tz_iana or tz_offset_min is None:
+        return None
+
+    try:
+        tz_offset_min = int(tz_offset_min)
+    except (TypeError, ValueError):
+        return None
+
+    return {
+        "tz_iana": tz_iana,
+        "tz_offset_min": tz_offset_min,
+    }
+
+def _write_user_timezone_with_cache_guard(user_id, profile, cache_key):
+    with _USER_TIMEZONE_CACHE_LOCK:
+        if _USER_TIMEZONE_CACHE.get(user_id) != cache_key:
+            return
+        try:
+            _write_user_timezone(user_id, profile)
+        except Exception:
+            if _USER_TIMEZONE_CACHE.get(user_id) == cache_key:
+                _USER_TIMEZONE_CACHE.pop(user_id, None)
+
+def _write_user_timezone(user_id, profile):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        conn.execute(
+            """
+            UPDATE user
+            SET tz_iana = ?, tz_offset_min = ?, tz_updated_at = ?
+            WHERE id = ?
+            """,
+            (profile["tz_iana"], profile["tz_offset_min"], now_str, user_id),
+        )
+        conn.commit()
+
 def get_user_profile(user_id):
     with closing(get_db()) as conn:
         cursor = conn.cursor()
@@ -317,6 +425,7 @@ def _purge_deleted_user_data(cursor, user_id, deleted_at):
     user_key = f"user_{user_id}"
 
     _delete_from_existing_table(cursor, "user_chat_message", "user_id = ?", (user_id,))
+    _delete_from_existing_table(cursor, "user_diary", "user_id = ?", (user_id,))
     _delete_from_existing_table(
         cursor,
         "user_feedback_comment",
@@ -517,19 +626,48 @@ def _format_feedback_row(row, comments):
         "createdAt": row["created_at"],
     }
 
-def append_chat_message(user_id, session_id, role, content, message_type="text", source="APP", request_id="", image_url=""):
+def append_chat_message(
+    user_id,
+    session_id,
+    role,
+    content,
+    message_type="text",
+    source="APP",
+    request_id="",
+    image_url="",
+    weather_text="",
+    diary_title="",
+    diary_summary="",
+):
     content_text = content or ""
     image_url_text = image_url or ""
-    if not user_id or user_id == -1 or (not content_text and not image_url_text):
+    weather_text = weather_text or ""
+    diary_title = diary_title or ""
+    diary_summary = diary_summary or ""
+    has_card_payload = message_type == "card" and (weather_text or diary_title or diary_summary)
+    if not user_id or user_id == -1 or (not content_text and not image_url_text and not has_card_payload):
         return None
     now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO user_chat_message
-            (user_id, session_id, role, content, image_url, message_type, source, request_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (user_id, session_id or "", role, content_text, image_url_text, message_type, source or "APP", request_id or "", now_str))
+            (user_id, session_id, role, content, image_url, message_type, weather_text, diary_title, diary_summary, source, request_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            session_id or "",
+            role,
+            content_text,
+            image_url_text,
+            message_type,
+            weather_text,
+            diary_title,
+            diary_summary,
+            source or "APP",
+            request_id or "",
+            now_str,
+        ))
         message_id = cursor.lastrowid
         cursor.execute("""
             DELETE FROM user_chat_message
@@ -544,6 +682,20 @@ def append_chat_message(user_id, session_id, role, content, message_type="text",
         conn.commit()
         return message_id
 
+def append_diary_card_message(user_id, diary_title, diary_summary, weather_text="", request_id=""):
+    return append_chat_message(
+        user_id=user_id,
+        session_id=f"user_{user_id}",
+        role="assistant",
+        content=diary_summary or diary_title or "",
+        message_type="card",
+        source="APP",
+        request_id=request_id or "",
+        weather_text=weather_text or "",
+        diary_title=diary_title or "",
+        diary_summary=diary_summary or "",
+    )
+
 def list_chat_messages(user_id, offset=None, limit=50):
     safe_limit = max(1, min(int(limit or 50), 100))
     params = [user_id]
@@ -554,7 +706,7 @@ def list_chat_messages(user_id, offset=None, limit=50):
     params.append(safe_limit)
     with closing(get_db()) as conn:
         rows = conn.execute(f"""
-            SELECT id, role, content, image_url, message_type, source, request_id, created_at
+            SELECT id, role, content, image_url, message_type, weather_text, diary_title, diary_summary, source, request_id, created_at
             FROM user_chat_message
             WHERE {where}
             ORDER BY id DESC
@@ -578,6 +730,9 @@ def list_chat_messages(user_id, offset=None, limit=50):
                     "content": msg["content"],
                     "imageUrl": msg["image_url"] or "",
                     "messageType": msg["message_type"],
+                    "weatherText": msg["weather_text"] or "",
+                    "diaryTitle": msg["diary_title"] or "",
+                    "diarySummary": msg["diary_summary"] or "",
                     "source": msg["source"],
                     "requestId": msg["request_id"],
                     "createdAt": msg["created_at"],
@@ -588,6 +743,77 @@ def list_chat_messages(user_id, offset=None, limit=50):
             "hasMore": has_more,
             "limit": safe_limit,
         }
+
+def get_user_diary_detail(user_id, ts_ms):
+    diary_date = _diary_date_from_ts_ms(user_id, ts_ms)
+    with closing(get_db()) as conn:
+        row = conn.execute("""
+            SELECT state, title, content, image_urls, generated_at, created_at
+            FROM user_diary
+            WHERE user_id = ? AND diary_date = ?
+        """, (user_id, diary_date)).fetchone()
+
+    if not row:
+        return {
+            "createdAt": 0,
+            "state": "EMPTY",
+            "imageUrls": [],
+            "title": "",
+            "content": "",
+        }
+
+    image_urls = _loads_json_array(row["image_urls"])
+    created_at = row["generated_at"] or row["created_at"]
+    return {
+        "createdAt": _datetime_str_to_ms(created_at),
+        "state": row["state"] if row["state"] in DIARY_STATES else "GENERATING",
+        "imageUrls": image_urls,
+        "title": row["title"] or "",
+        "content": row["content"] or "",
+    }
+
+def _diary_date_from_ts_ms(user_id, ts_ms):
+    ts_ms = int(ts_ms)
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            "SELECT tz_iana, tz_offset_min FROM user WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+    tzinfo = _timezone_from_user_row(row)
+    return datetime.fromtimestamp(ts_ms / 1000.0, tzinfo).strftime("%Y-%m-%d")
+
+def _timezone_from_user_row(row):
+    tz_iana = row["tz_iana"] if row else ""
+    if tz_iana and ZoneInfo:
+        try:
+            return ZoneInfo(tz_iana)
+        except Exception:
+            pass
+
+    try:
+        offset_min = int(row["tz_offset_min"]) if row else 480
+    except (TypeError, ValueError):
+        offset_min = 480
+    return timezone(timedelta(minutes=offset_min))
+
+def _loads_json_array(value):
+    try:
+        data = json.loads(value or "[]")
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, str)]
+
+def _datetime_str_to_ms(value):
+    if not value:
+        return 0
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return 0
+    return int(dt.replace(tzinfo=APP_TIMEZONE).timestamp() * 1000)
 
 def create_invite_code(code, expire_at_ms):
     user_group = -1
