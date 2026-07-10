@@ -14,7 +14,6 @@ except Exception:
 
 # Store DB in workspace data dir
 DB_DIR = os.path.expanduser('~/cow/data')
-os.makedirs(DB_DIR, exist_ok=True)
 DB_PATH = os.path.join(DB_DIR, 'soul.db')
 DEFAULT_USER_NICKNAME = "宝宝"
 DEFAULT_BEAR_NICKNAME = "满仓"
@@ -25,6 +24,7 @@ _USER_TIMEZONE_CACHE = {}
 _USER_TIMEZONE_CACHE_LOCK = threading.Lock()
 
 def get_db():
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -154,6 +154,13 @@ def init_db():
           summary TEXT NOT NULL DEFAULT '',
           image_urls TEXT NOT NULL DEFAULT '[]',
           weather_text VARCHAR(255) NOT NULL DEFAULT '',
+          mode VARCHAR(16) NOT NULL DEFAULT 'auto',
+          source_message_ids TEXT NOT NULL DEFAULT '[]',
+          source_transcript_hash VARCHAR(64) NOT NULL DEFAULT '',
+          error TEXT NOT NULL DEFAULT '',
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          next_retry_at DATETIME DEFAULT NULL,
+          generation_started_at DATETIME DEFAULT NULL,
           generated_at DATETIME DEFAULT NULL,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -166,6 +173,13 @@ def init_db():
             "summary": "TEXT NOT NULL DEFAULT ''",
             "image_urls": "TEXT NOT NULL DEFAULT '[]'",
             "weather_text": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "mode": "VARCHAR(16) NOT NULL DEFAULT 'auto'",
+            "source_message_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "source_transcript_hash": "VARCHAR(64) NOT NULL DEFAULT ''",
+            "error": "TEXT NOT NULL DEFAULT ''",
+            "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            "next_retry_at": "DATETIME DEFAULT NULL",
+            "generation_started_at": "DATETIME DEFAULT NULL",
             "generated_at": "DATETIME DEFAULT NULL",
         })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_diary_user_state_date ON user_diary(user_id, state, diary_date)")
@@ -683,6 +697,24 @@ def append_chat_message(
         return message_id
 
 def append_diary_card_message(user_id, diary_title, diary_summary, weather_text="", request_id=""):
+    if request_id:
+        with closing(get_db()) as conn:
+            existing = conn.execute("""
+                SELECT id FROM user_chat_message
+                WHERE user_id = ? AND message_type = 'card' AND request_id = ?
+            """, (user_id, request_id)).fetchone()
+        if existing:
+            with closing(get_db()) as conn:
+                conn.execute("""
+                    UPDATE user_chat_message
+                    SET content = ?, diary_title = ?, diary_summary = ?, weather_text = ?
+                    WHERE id = ?
+                """, (
+                    diary_summary or diary_title or "", diary_title or "",
+                    diary_summary or "", weather_text or "", existing["id"],
+                ))
+                conn.commit()
+            return existing["id"]
     return append_chat_message(
         user_id=user_id,
         session_id=f"user_{user_id}",
@@ -771,6 +803,138 @@ def get_user_diary_detail(user_id, ts_ms):
         "title": row["title"] or "",
         "content": row["content"] or "",
     }
+
+def list_active_users_for_diary():
+    with closing(get_db()) as conn:
+        rows = conn.execute("""
+            SELECT id, tz_iana, tz_offset_min
+            FROM user
+            WHERE account_status = 'active'
+            ORDER BY id
+        """).fetchall()
+    return [dict(row) for row in rows]
+
+def create_or_reset_diary_job(user_id, diary_date, mode="auto", force=False):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        cursor = conn.cursor()
+        existing = cursor.execute("""
+            SELECT id, state, generation_started_at FROM user_diary
+            WHERE user_id = ? AND diary_date = ?
+        """, (user_id, diary_date)).fetchone()
+        if existing and not force:
+            return dict(existing)
+        if existing and existing["state"] == "GENERATING" and existing["generation_started_at"]:
+            return dict(existing)
+        if existing:
+            cursor.execute("""
+                UPDATE user_diary
+                SET state = 'GENERATING', mode = ?, title = '', content = '', summary = '',
+                    image_urls = '[]', weather_text = '', source_message_ids = '[]',
+                    source_transcript_hash = '', error = '', retry_count = 0,
+                    next_retry_at = NULL, generation_started_at = NULL,
+                    generated_at = NULL, updated_at = ?
+                WHERE id = ?
+            """, (mode or "auto", now_str, existing["id"]))
+            diary_id = existing["id"]
+        else:
+            cursor.execute("""
+                INSERT INTO user_diary
+                (user_id, diary_date, state, mode, created_at, updated_at)
+                VALUES (?, ?, 'GENERATING', ?, ?, ?)
+            """, (user_id, diary_date, mode or "auto", now_str, now_str))
+            diary_id = cursor.lastrowid
+        conn.commit()
+        return {"id": diary_id, "state": "GENERATING"}
+
+def claim_diary_job(user_id, diary_date, stale_after_minutes=30):
+    now = _now_app_timezone()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    stale_before = (now - timedelta(minutes=stale_after_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_db()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("""
+            SELECT * FROM user_diary
+            WHERE user_id = ? AND diary_date = ? AND state = 'GENERATING'
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+              AND (generation_started_at IS NULL OR generation_started_at <= ?)
+        """, (user_id, diary_date, now_str, stale_before)).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        cursor = conn.execute("""
+            UPDATE user_diary
+            SET generation_started_at = ?, updated_at = ?
+            WHERE id = ? AND state = 'GENERATING'
+        """, (now_str, now_str, row["id"]))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        result = dict(row)
+        result["generation_started_at"] = now_str
+        return result
+
+def list_chat_messages_in_window(user_id, start_at, end_at):
+    with closing(get_db()) as conn:
+        rows = conn.execute("""
+            SELECT id, role, content, image_url, message_type, weather_text, created_at
+            FROM user_chat_message
+            WHERE user_id = ? AND created_at >= ? AND created_at < ?
+              AND message_type != 'card'
+            ORDER BY id ASC
+        """, (user_id, start_at, end_at)).fetchall()
+    return [dict(row) for row in rows]
+
+def complete_diary_job(
+    diary_id,
+    title,
+    content,
+    summary,
+    image_urls,
+    weather_text,
+    mode,
+    source_message_ids,
+    source_transcript_hash,
+):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        conn.execute("""
+            UPDATE user_diary
+            SET state = 'DONE', title = ?, content = ?, summary = ?, image_urls = ?,
+                weather_text = ?, mode = ?, source_message_ids = ?, source_transcript_hash = ?,
+                error = '', next_retry_at = NULL, generation_started_at = NULL,
+                generated_at = ?, updated_at = ?
+            WHERE id = ?
+        """, (
+            title or "", content or "", summary or "",
+            json.dumps(image_urls or [], ensure_ascii=False), weather_text or "", mode or "auto",
+            json.dumps(source_message_ids or [], ensure_ascii=False), source_transcript_hash or "",
+            now_str, now_str, diary_id,
+        ))
+        conn.commit()
+
+def fail_diary_job(diary_id, error, max_retries=3):
+    now = _now_app_timezone()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_db()) as conn:
+        row = conn.execute("SELECT retry_count FROM user_diary WHERE id = ?", (diary_id,)).fetchone()
+        retry_count = (int(row["retry_count"]) if row else 0) + 1
+        if retry_count >= max_retries:
+            state = "SKIPPED"
+            next_retry_at = None
+        else:
+            state = "GENERATING"
+            delay_minutes = min(60, 5 * (2 ** (retry_count - 1)))
+            next_retry_at = (now + timedelta(minutes=delay_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("""
+            UPDATE user_diary
+            SET state = ?, error = ?, retry_count = ?, next_retry_at = ?,
+                generation_started_at = NULL, updated_at = ?
+            WHERE id = ?
+        """, (state, str(error)[:4000], retry_count, next_retry_at, now_str, diary_id))
+        conn.commit()
+        return state
 
 def _diary_date_from_ts_ms(user_id, ts_ms):
     ts_ms = int(ts_ms)

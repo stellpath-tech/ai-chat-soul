@@ -99,6 +99,31 @@ available_setting = {
     "thing_memory_extractor_api_key": "",   # 提取器专用 key；不填则复用 open_ai_api_key
     "thing_memory_extractor_api_base": "",  # 提取器专用 base；不填则复用 open_ai_api_base
 
+    # 每日记忆日记（生产任务默认关闭，配置完成模型后再开启 worker）
+    "diary_worker_enabled": False,
+    "diary_generation_hour": 1,
+    "diary_worker_poll_seconds": 300,
+    "diary_quiet_message_threshold": 3,
+    "diary_max_chars": 120,
+    "diary_max_retries": 3,
+    "diary_text_model": "",
+    "diary_text_api_key": "",
+    "diary_text_api_base": "",
+    "diary_image_enabled": False,
+    "diary_image_model": "gpt-image-2",
+    "diary_image_api_key": "",
+    "diary_image_api_base": "https://api.openai.com/v1",
+    "diary_image_count": 1,
+    "diary_image_size": "1024x1024",
+    "diary_image_quality": "medium",
+    "diary_image_storage": "local",
+    "diary_public_base_url": "",
+    "diary_oss_access_key_id": "",
+    "diary_oss_access_key_secret": "",
+    "diary_oss_bucket": "",
+    "diary_oss_endpoint": "",
+    "diary_oss_public_base_url": "",
+
     "qwen_access_key_id": "",
     "qwen_access_key_secret": "",
     "qwen_agent_key": "",

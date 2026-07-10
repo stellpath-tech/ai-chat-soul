@@ -18,6 +18,7 @@ import os
 import mimetypes
 import threading
 import logging
+from datetime import datetime, timedelta, timezone
 import channel.web.database as db
 from channel.web.metrics import MetricsHandler, metrics_processor, USER_AUTH_TOTAL
 
@@ -141,6 +142,7 @@ class WebChannel(ChatChannel):
         self._pet_event_lock = threading.Lock()
         self._pet_event_max = 50
         self._account_cleanup_started = False
+        self._diary_worker_started = False
 
 
     def _generate_msg_id(self):
@@ -715,6 +717,7 @@ class WebChannel(ChatChannel):
                         source,
                         request_id,
                         image_url_input,
+                        weather_text=sensor_label,
                     )
                     if prompt and prompt.strip():
                         db.append_chat_message(
@@ -725,6 +728,7 @@ class WebChannel(ChatChannel):
                             "text",
                             source,
                             request_id,
+                            weather_text=sensor_label,
                         )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
@@ -801,6 +805,7 @@ class WebChannel(ChatChannel):
                         "image_b64",
                         source,
                         request_id,
+                        weather_text=sensor_label,
                     )
 
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
@@ -865,7 +870,10 @@ class WebChannel(ChatChannel):
             if source == "DEVICE" and device_id:
                 self._push_chatlog(device_id, "user", prompt)
             if user_id != -1:
-                message_id = db.append_chat_message(user_id, session_id, "user", prompt, "text", source, request_id)
+                message_id = db.append_chat_message(
+                    user_id, session_id, "user", prompt, "text", source, request_id,
+                    weather_text=sensor_label,
+                )
 
             threading.Thread(target=self._produce_with_logging, args=(context,)).start()
 
@@ -1010,6 +1018,7 @@ class WebChannel(ChatChannel):
         port = conf().get("web_port", 9899)
         db.init_db()
         self._start_account_cleanup_thread()
+        self._start_diary_worker()
 
         # 从磁盘恢复设备注册表
         self._load_device_registry()
@@ -1067,6 +1076,7 @@ class WebChannel(ChatChannel):
             '/api/weather', 'WeatherHandler',
             '/metrics', 'MetricsHandler',
             '/assets/(.*)', 'AssetsHandler',
+            '/diary-images/(.*)', 'DiaryImageHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
         app.add_processor(metrics_processor)
@@ -1111,6 +1121,17 @@ class WebChannel(ChatChannel):
             daemon=True,
             name="account-cleanup",
         ).start()
+
+    def _start_diary_worker(self):
+        if self._diary_worker_started:
+            return
+        self._diary_worker_started = True
+        try:
+            from channel.web.diary.worker import start_diary_worker
+            start_diary_worker()
+        except Exception as e:
+            logger.exception("[WebChannel] Failed to start diary worker: %s", e)
+            event_log.log_exception("diary_worker_start_failed", e)
 
     def stop(self):
         if self._http_server:
@@ -1641,6 +1662,40 @@ class DiaryHandler:
             event_log.log_exception("diary_detail_failed", e, endpoint="/api/diary")
             return _api_response(False, "Server error", None)
 
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            body = json.loads(web.data() or b"{}")
+            from channel.web.diary.service import enqueue_diary_for_user, _user_timezone
+            target_date = str(body.get("targetDate") or "").strip()
+            if not target_date:
+                local_now = datetime.now(timezone.utc).astimezone(_user_timezone(user))
+                target_date = (local_now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+            mode = str(body.get("mode") or "auto").lower()
+            if mode not in {"auto", "normal", "quiet"}:
+                return _api_response(False, "Invalid mode", None)
+            job = enqueue_diary_for_user(
+                user["id"], target_date, mode=mode,
+                force=bool(body.get("force", False)), run_async=True,
+            )
+            web.ctx.status = '202 Accepted'
+            return _api_response(True, "Accepted", {
+                "id": job.get("id"),
+                "state": job.get("state"),
+                "targetDate": target_date,
+            })
+        except (ValueError, TypeError) as e:
+            return _api_response(False, str(e), None)
+        except Exception as e:
+            logger.exception("DiaryHandler POST error: %s", e)
+            event_log.log_exception("diary_generate_failed", e, endpoint="/api/diary")
+            return _api_response(False, "Server error", None)
+
 
 class InviteCodeHandler:
     def POST(self):
@@ -1814,6 +1869,26 @@ class AssetsHandler:
                 endpoint="/assets",
                 file_path=file_path or "",
             )
+            raise web.notfound()
+
+
+class DiaryImageHandler:
+    def GET(self, file_path):
+        try:
+            root = os.path.abspath(os.path.join(os.path.expanduser("~/cow/data"), "diary_images"))
+            full_path = os.path.abspath(os.path.normpath(os.path.join(root, file_path)))
+            if os.path.commonpath([full_path, root]) != root:
+                raise web.notfound()
+            if not os.path.isfile(full_path):
+                raise web.notfound()
+            web.header('Content-Type', mimetypes.guess_type(full_path)[0] or 'application/octet-stream')
+            web.header('Cache-Control', 'public, max-age=31536000, immutable')
+            with open(full_path, 'rb') as file:
+                return file.read()
+        except web.HTTPError:
+            raise
+        except Exception as e:
+            logger.warning("[Diary] image serve failed path=%s error=%s", file_path, e)
             raise web.notfound()
 
 
