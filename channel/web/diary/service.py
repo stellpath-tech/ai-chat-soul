@@ -19,6 +19,7 @@ from channel.web.diary.prompts import (
     QUIET_SCENES,
 )
 from channel.web.diary.storage import decode_image_base64, store_diary_image
+from channel.web.push.service import deliver_generated_diary_notification
 
 try:
     from zoneinfo import ZoneInfo
@@ -131,6 +132,7 @@ def generate_user_diary(user, diary_date):
             user["id"], title, summary, weather_text=weather_text,
             request_id="diary:{}".format(diary_date),
         )
+        deliver_generated_diary_notification(user["id"], diary_date)
         logger.info(
             "[Diary] generated user=%s date=%s mode=%s messages=%s images=%s",
             user["id"], diary_date, resolved_mode, len(messages), len(image_urls),

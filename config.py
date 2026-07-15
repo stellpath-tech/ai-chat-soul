@@ -124,6 +124,14 @@ available_setting = {
     "diary_oss_endpoint": "",
     "diary_oss_public_base_url": "",
 
+    # 腾讯云 TIMPush 服务端单发推送
+    "tencent_im_sdk_app_id": 0,
+    "tencent_im_admin_user_id": "administrator",
+    "tencent_im_secret_key": "",
+    "tencent_im_api_base": "https://console.tim.qq.com",
+    "tencent_im_push_timeout_seconds": 10,
+    "tencent_im_push_max_retries": 3,
+
     "qwen_access_key_id": "",
     "qwen_access_key_secret": "",
     "qwen_agent_key": "",
@@ -481,4 +489,3 @@ def pconf(plugin_name: str) -> dict:
 
 # 鍏ㄥ眬閰嶇疆锛岀敤浜庡瓨鏀惧叏灞€鐢熸晥鐨勭姸鎬?
 global_config = {"admin_users": []}
-

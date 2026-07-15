@@ -71,6 +71,33 @@ def init_db():
             "deletion_deadline": "DATETIME DEFAULT NULL",
             "deleted_at": "DATETIME DEFAULT NULL",
         })
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_push_device (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id BIGINT NOT NULL UNIQUE,
+          platform VARCHAR(32) NOT NULL,
+          push_token TEXT NOT NULL,
+          device_id VARCHAR(255) NOT NULL DEFAULT '',
+          app_version VARCHAR(64) NOT NULL DEFAULT '',
+          os_version VARCHAR(64) NOT NULL DEFAULT '',
+          device_brand VARCHAR(64) NOT NULL DEFAULT '',
+          device_model VARCHAR(128) NOT NULL DEFAULT '',
+          push_provider VARCHAR(32) NOT NULL DEFAULT 'TIMPUSH',
+          enabled TINYINT NOT NULL DEFAULT 1,
+          last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_push_device_token "
+            "ON user_push_device(push_token)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_push_device_enabled "
+            "ON user_push_device(enabled, last_seen_at)"
+        )
         
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS invite_code (
@@ -162,6 +189,13 @@ def init_db():
           next_retry_at DATETIME DEFAULT NULL,
           generation_started_at DATETIME DEFAULT NULL,
           generated_at DATETIME DEFAULT NULL,
+          push_state VARCHAR(32) NOT NULL DEFAULT 'NONE',
+          push_retry_count INTEGER NOT NULL DEFAULT 0,
+          push_next_retry_at DATETIME DEFAULT NULL,
+          push_started_at DATETIME DEFAULT NULL,
+          push_task_id VARCHAR(255) NOT NULL DEFAULT '',
+          push_error TEXT NOT NULL DEFAULT '',
+          push_sent_at DATETIME DEFAULT NULL,
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(user_id, diary_date)
@@ -181,8 +215,19 @@ def init_db():
             "next_retry_at": "DATETIME DEFAULT NULL",
             "generation_started_at": "DATETIME DEFAULT NULL",
             "generated_at": "DATETIME DEFAULT NULL",
+            "push_state": "VARCHAR(32) NOT NULL DEFAULT 'NONE'",
+            "push_retry_count": "INTEGER NOT NULL DEFAULT 0",
+            "push_next_retry_at": "DATETIME DEFAULT NULL",
+            "push_started_at": "DATETIME DEFAULT NULL",
+            "push_task_id": "VARCHAR(255) NOT NULL DEFAULT ''",
+            "push_error": "TEXT NOT NULL DEFAULT ''",
+            "push_sent_at": "DATETIME DEFAULT NULL",
         })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_diary_user_state_date ON user_diary(user_id, state, diary_date)")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_diary_push_pending "
+            "ON user_diary(push_state, push_next_retry_at, push_started_at)"
+        )
         
         conn.commit()
 
@@ -289,6 +334,69 @@ def get_active_user_by_token(token):
     if not user or user.get("account_status") != "active":
         return None
     return user
+
+def register_user_push_device(
+    user_id,
+    platform,
+    push_token,
+    device_id="",
+    app_version="",
+    os_version="",
+    device_brand="",
+    device_model="",
+):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM user_push_device WHERE push_token = ? AND user_id != ?",
+            (push_token, user_id),
+        )
+        conn.execute("""
+            INSERT INTO user_push_device
+            (user_id, platform, push_token, device_id, app_version, os_version,
+             device_brand, device_model, push_provider, enabled, last_seen_at,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'TIMPUSH', 1, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                platform = excluded.platform,
+                push_token = excluded.push_token,
+                device_id = excluded.device_id,
+                app_version = excluded.app_version,
+                os_version = excluded.os_version,
+                device_brand = excluded.device_brand,
+                device_model = excluded.device_model,
+                push_provider = 'TIMPUSH',
+                enabled = 1,
+                last_seen_at = excluded.last_seen_at,
+                updated_at = excluded.updated_at
+        """, (
+            user_id, platform, push_token, device_id or "", app_version or "",
+            os_version or "", device_brand or "", device_model or "",
+            now_str, now_str, now_str,
+        ))
+        conn.commit()
+
+def unregister_user_push_device(user_id, push_token):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        cursor = conn.execute("""
+            UPDATE user_push_device
+            SET enabled = 0, updated_at = ?
+            WHERE user_id = ? AND push_token = ? AND enabled = 1
+        """, (now_str, user_id, push_token))
+        conn.commit()
+        return cursor.rowcount == 1
+
+def get_user_push_device(user_id):
+    with closing(get_db()) as conn:
+        row = conn.execute("""
+            SELECT user_id, platform, push_token, device_id, app_version, os_version,
+                   device_brand, device_model, enabled, last_seen_at
+            FROM user_push_device
+            WHERE user_id = ?
+        """, (user_id,)).fetchone()
+    return dict(row) if row else None
 
 def record_user_timezone_async(user_id, timezone_payload):
     profile = _normalize_user_timezone(timezone_payload)
@@ -404,6 +512,11 @@ def request_account_deletion(user_id):
                 updated_at = ?
             WHERE id = ?
         """, (now_str, deadline, now_str, user_id))
+        conn.execute("""
+            UPDATE user_push_device
+            SET enabled = 0, updated_at = ?
+            WHERE user_id = ?
+        """, (now_str, user_id))
         conn.commit()
     return deadline
 
@@ -440,6 +553,7 @@ def _purge_deleted_user_data(cursor, user_id, deleted_at):
 
     _delete_from_existing_table(cursor, "user_chat_message", "user_id = ?", (user_id,))
     _delete_from_existing_table(cursor, "user_diary", "user_id = ?", (user_id,))
+    _delete_from_existing_table(cursor, "user_push_device", "user_id = ?", (user_id,))
     _delete_from_existing_table(
         cursor,
         "user_feedback_comment",
@@ -833,7 +947,10 @@ def create_or_reset_diary_job(user_id, diary_date, mode="auto", force=False):
                     image_urls = '[]', weather_text = '', source_message_ids = '[]',
                     source_transcript_hash = '', error = '', retry_count = 0,
                     next_retry_at = NULL, generation_started_at = NULL,
-                    generated_at = NULL, updated_at = ?
+                    generated_at = NULL, push_state = 'NONE', push_retry_count = 0,
+                    push_next_retry_at = NULL, push_started_at = NULL,
+                    push_task_id = '', push_error = '', push_sent_at = NULL,
+                    updated_at = ?
                 WHERE id = ?
             """, (mode or "auto", now_str, existing["id"]))
             diary_id = existing["id"]
@@ -904,7 +1021,10 @@ def complete_diary_job(
             SET state = 'DONE', title = ?, content = ?, summary = ?, image_urls = ?,
                 weather_text = ?, mode = ?, source_message_ids = ?, source_transcript_hash = ?,
                 error = '', next_retry_at = NULL, generation_started_at = NULL,
-                generated_at = ?, updated_at = ?
+                generated_at = ?, push_state = 'PENDING', push_retry_count = 0,
+                push_next_retry_at = NULL, push_started_at = NULL,
+                push_task_id = '', push_error = '', push_sent_at = NULL,
+                updated_at = ?
             WHERE id = ?
         """, (
             title or "", content or "", summary or "",
@@ -913,6 +1033,115 @@ def complete_diary_job(
             now_str, now_str, diary_id,
         ))
         conn.commit()
+
+def claim_diary_push_notification(user_id=None, diary_date=None, stale_after_minutes=10):
+    now = _now_app_timezone()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    stale_before = (now - timedelta(minutes=stale_after_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    where = [
+        "d.state = 'DONE'",
+        "d.push_state = 'PENDING'",
+        "(d.push_next_retry_at IS NULL OR d.push_next_retry_at <= ?)",
+        "(d.push_started_at IS NULL OR d.push_started_at <= ?)",
+        "u.account_status = 'active'",
+    ]
+    params = [now_str, stale_before]
+    if user_id is not None:
+        where.append("d.user_id = ?")
+        params.append(int(user_id))
+    if diary_date is not None:
+        where.append("d.diary_date = ?")
+        params.append(str(diary_date))
+
+    with closing(get_db()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(f"""
+            SELECT d.id AS diary_id, d.user_id, d.diary_date,
+                   u.tz_iana, u.tz_offset_min,
+                   p.push_token, p.platform
+            FROM user_diary d
+            JOIN user u ON u.id = d.user_id
+            LEFT JOIN user_push_device p
+              ON p.user_id = d.user_id AND p.enabled = 1
+            WHERE {' AND '.join(where)}
+            ORDER BY d.id
+            LIMIT 1
+        """, params).fetchone()
+        if not row:
+            conn.rollback()
+            return None
+        cursor = conn.execute("""
+            UPDATE user_diary
+            SET push_started_at = ?, updated_at = ?
+            WHERE id = ? AND push_state = 'PENDING'
+        """, (now_str, now_str, row["diary_id"]))
+        if cursor.rowcount != 1:
+            conn.rollback()
+            return None
+        conn.commit()
+        return dict(row)
+
+def mark_diary_push_sent(diary_id, task_id):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        conn.execute("""
+            UPDATE user_diary
+            SET push_state = 'SENT', push_task_id = ?, push_error = '',
+                push_next_retry_at = NULL, push_started_at = NULL,
+                push_sent_at = ?, updated_at = ?
+            WHERE id = ?
+        """, (task_id or "", now_str, now_str, diary_id))
+        conn.commit()
+
+def mark_diary_push_skipped(diary_id, reason):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        conn.execute("""
+            UPDATE user_diary
+            SET push_state = 'SKIPPED', push_error = ?,
+                push_next_retry_at = NULL, push_started_at = NULL,
+                updated_at = ?
+            WHERE id = ?
+        """, (str(reason or "")[:4000], now_str, diary_id))
+        conn.commit()
+
+def mark_diary_push_failed(diary_id, error, max_retries=3, now=None):
+    now = now or _now_app_timezone()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            "SELECT push_retry_count FROM user_diary WHERE id = ?",
+            (diary_id,),
+        ).fetchone()
+        retry_count = (int(row["push_retry_count"]) if row else 0) + 1
+        if retry_count >= max(1, int(max_retries)):
+            state = "FAILED"
+            next_retry_at = None
+        else:
+            state = "PENDING"
+            delay_minutes = min(60, 2 ** (retry_count - 1))
+            next_retry_at = (now + timedelta(minutes=delay_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("""
+            UPDATE user_diary
+            SET push_state = ?, push_retry_count = ?, push_next_retry_at = ?,
+                push_started_at = NULL, push_error = ?, updated_at = ?
+            WHERE id = ?
+        """, (
+            state, retry_count, next_retry_at, str(error or "")[:4000],
+            now_str, diary_id,
+        ))
+        conn.commit()
+        return state
+
+def get_diary_push_delivery(user_id, diary_date):
+    with closing(get_db()) as conn:
+        row = conn.execute("""
+            SELECT push_state, push_retry_count, push_next_retry_at,
+                   push_task_id, push_error, push_sent_at
+            FROM user_diary
+            WHERE user_id = ? AND diary_date = ?
+        """, (user_id, diary_date)).fetchone()
+    return dict(row) if row else None
 
 def fail_diary_job(diary_id, error, max_retries=3):
     now = _now_app_timezone()

@@ -6,6 +6,7 @@ from common.log import logger
 from config import conf
 import channel.web.database as db
 from channel.web.diary.service import _user_timezone, generate_user_diary
+from channel.web.push.service import retry_pending_diary_notifications
 
 
 _START_LOCK = threading.Lock()
@@ -49,6 +50,7 @@ def _worker_loop():
     while True:
         try:
             run_scheduled_diaries_once()
+            retry_pending_diary_notifications()
         except Exception:
             logger.exception("[Diary] worker iteration failed")
         time.sleep(interval)

@@ -21,6 +21,15 @@ import logging
 from datetime import datetime, timedelta, timezone
 import channel.web.database as db
 from channel.web.metrics import MetricsHandler, metrics_processor, USER_AUTH_TOTAL
+from channel.web.push.service import (
+    PushDeviceRequestError,
+    PushTestDeliveryError,
+    PushTestDeviceNotRegisteredError,
+    PushTestRequestError,
+    register_authenticated_user_push_device,
+    send_authenticated_user_push_test,
+    unregister_authenticated_user_push_device,
+)
 
 try:
     from common import event_log
@@ -1068,6 +1077,9 @@ class WebChannel(ChatChannel):
             '/api/admin/complaints/comment', 'ComplaintAdminCommentHandler',
             '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
             '/api/app/version', 'AppVersionHandler',
+            '/api/push/register', 'UserPushDeviceRegisterHandler',
+            '/api/push/unregister', 'UserPushDeviceUnregisterHandler',
+            '/api/push/test', 'PushTestHandler',
             '/api/chat/history', 'ChatHistoryHandler',
             '/api/diary', 'DiaryHandler',
             '/api/invite_code', 'InviteCodeHandler',
@@ -1618,6 +1630,87 @@ class AppVersionHandler:
         except Exception as e:
             logger.exception(f"AppVersionHandler error: {e}")
             event_log.log_exception("app_version_failed", e, endpoint="/api/app/version")
+            return _api_response(False, "Server error", None)
+
+
+class UserPushDeviceRegisterHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            request_body = json.loads(web.data() or b"{}")
+            register_authenticated_user_push_device(user["id"], request_body)
+            return _api_response(True, "Success", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except PushDeviceRequestError as error:
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("UserPushDeviceRegisterHandler error: %s", error)
+            event_log.log_exception(
+                "push_device_register_failed", error, endpoint="/api/push/register"
+            )
+            return _api_response(False, "Server error", None)
+
+
+class UserPushDeviceUnregisterHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            request_body = json.loads(web.data() or b"{}")
+            unregister_authenticated_user_push_device(user["id"], request_body)
+            return _api_response(True, "Success", None)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except PushDeviceRequestError as error:
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("UserPushDeviceUnregisterHandler error: %s", error)
+            event_log.log_exception(
+                "push_device_unregister_failed", error,
+                endpoint="/api/push/unregister",
+            )
+            return _api_response(False, "Server error", None)
+
+
+class PushTestHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            request_body = json.loads(web.data() or b"{}")
+            result = send_authenticated_user_push_test(user["id"], request_body)
+            return _api_response(True, "Success", result)
+        except json.JSONDecodeError:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, "invalid JSON body", None)
+        except PushTestRequestError as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except PushTestDeviceNotRegisteredError as error:
+            web.ctx.status = '409 Conflict'
+            return _api_response(False, str(error), None)
+        except PushTestDeliveryError as error:
+            web.ctx.status = '502 Bad Gateway'
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("PushTestHandler error: %s", error)
+            event_log.log_exception(
+                "push_test_failed", error, endpoint="/api/push/test"
+            )
             return _api_response(False, "Server error", None)
 
 

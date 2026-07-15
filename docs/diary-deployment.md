@@ -79,10 +79,64 @@ curl -X POST http://127.0.0.1:9899/api/diary \
 OSS RAM 账号只需要目标 bucket 的 `PutObject` 权限。图片失败不会回滚已经生成的文字；
 当天日记仍会进入 `DONE`，但 `imageUrls` 可能为空。
 
+## TIMPush 通知
+
+服务端通过腾讯云单发推送接口发送日记完成通知。生产配置需要设置：
+
+```json
+{
+  "tencent_im_sdk_app_id": 1600150143,
+  "tencent_im_admin_user_id": "administrator",
+  "tencent_im_secret_key": "服务端 Chat 应用密钥",
+  "tencent_im_api_base": "https://console.tim.qq.com",
+  "tencent_im_push_timeout_seconds": 10,
+  "tencent_im_push_max_retries": 3
+}
+```
+
+`tencent_im_secret_key` 只能放在服务端配置或环境变量中。客户端使用的 Push Key、
+Android `timpush-configs.json` 和厂商证书不需要部署到本服务。
+
+Flutter 调用 TIMPush `getRegistrationID()` 后，将返回值作为 `pushToken` 注册：
+
+```bash
+curl -X POST http://127.0.0.1:9899/api/push/register \
+  -H 'Content-Type: application/json' \
+  -H 'X-Auth-Token: USER_TOKEN' \
+  -d '{"platform":"android","pushToken":"TIMPush RegistrationID"}'
+```
+
+退出账号时使用同一个 `pushToken` 解绑：
+
+```bash
+curl -X POST http://127.0.0.1:9899/api/push/unregister \
+  -H 'Content-Type: application/json' \
+  -H 'X-Auth-Token: USER_TOKEN' \
+  -d '{"pushToken":"TIMPush RegistrationID"}'
+```
+
+客户端联调时，可以向当前登录用户绑定的设备发送自定义测试通知：
+
+```bash
+curl -X POST http://127.0.0.1:9899/api/push/test \
+  -H 'Content-Type: application/json' \
+  -H 'X-Auth-Token: USER_TOKEN' \
+  -d '{"title":"联调标题","content":"联调正文"}'
+```
+
+该接口不读取或修改日记、聊天记录和正式推送状态，成功时返回腾讯云
+`taskId`。`title` 长度为 1 至 32 个字符，`content` 长度为 1 至 50 个字符；
+当前用户没有注册中的推送设备时返回 `409`。
+
+日记完成后会立即尝试推送。腾讯接口失败时，日记保持 `DONE`，推送按照
+`tencent_im_push_max_retries` 独立重试；通知点击参数通过 `Ext` 透传
+`type=diary`、`diaryDate` 和 `ts`。
+
 ## 发布检查
 
 1. 备份 `~/cow/data/soul.db`。
 2. 发布代码并重启 Web 服务；启动时会自动补充表字段。
 3. 保持 `diary_worker_enabled=false`，先通过 POST 手动生成一名测试用户。
 4. 确认详情接口、聊天历史日记卡片、图片 URL 都正常。
-5. 开启 worker，观察至少一个跨日任务及失败重试日志。
+5. 使用真机 RegistrationID 调用注册接口，并在腾讯云接入测试中确认设备可达。
+6. 开启 worker，观察至少一个跨日任务、推送 TaskId 及失败重试日志。
