@@ -28,7 +28,7 @@ def metrics_processor(handler):
     try:
         endpoint = web.ctx.path
         method = web.ctx.method
-    except:
+    except Exception:
         endpoint = "unknown"
         method = "unknown"
         
@@ -40,9 +40,9 @@ def metrics_processor(handler):
         if hasattr(web.ctx, 'status'):
             status = str(web.ctx.status).split(' ')[0]
         return result
-    except Exception as e:
-        if isinstance(e, web.HTTPError):
-            status = str(e.status).split(' ')[0]
+    except Exception as error:
+        if isinstance(error, web.HTTPError):
+            status = str(getattr(web.ctx, 'status', '500')).split(' ')[0]
         else:
             status = '500'
         raise

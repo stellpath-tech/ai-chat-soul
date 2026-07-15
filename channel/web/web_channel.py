@@ -1090,6 +1090,7 @@ class WebChannel(ChatChannel):
             '/assets/(.*)', 'AssetsHandler',
             '/diary-images/(.*)', 'DiaryImageHandler',
         )
+        web.config.debug = bool(conf().get("debug", False))
         app = web.application(urls, globals(), autoreload=False)
         app.add_processor(metrics_processor)
         
