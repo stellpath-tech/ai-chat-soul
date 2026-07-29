@@ -722,11 +722,18 @@ class AgentStreamExecutor:
                         "抱歉，之前的对话出现了问题。我已清空历史记录，请重新发送你的消息。"
                     )
             
+            # AgentLLMModel already owns the single provider retry. These
+            # markers prevent this outer layer from starting another request.
+            request_retry_already_handled = any(marker in error_str_lower for marker in [
+                '[request_retry_exhausted]',
+                '[partial_response_abort]',
+            ])
+
             # Check if error is rate limit (429)
             is_rate_limit = '429' in error_str_lower or 'rate limit' in error_str_lower
             
             # Check if error is retryable (timeout, connection, server busy, etc.)
-            is_retryable = any(keyword in error_str_lower for keyword in [
+            is_retryable = not request_retry_already_handled and any(keyword in error_str_lower for keyword in [
                 'timeout', 'timed out', 'connection', 'network', 
                 'rate limit', 'overloaded', 'unavailable', 'busy', 'retry',
                 '429', '500', '502', '503', '504', '512'
@@ -809,13 +816,17 @@ class AgentStreamExecutor:
 
         # Check for empty response and retry once if enabled
         if retry_on_empty and not full_content and not tool_calls:
-            logger.warning(f"⚠️  LLM returned empty response (stop_reason: {stop_reason}), retrying once...")
+            logger.warning(
+                f"⚠️  LLM returned empty response (stop_reason: {stop_reason}), "
+                f"retrying once in 15s..."
+            )
             self._emit_event("message_end", {
                 "content": "",
                 "tool_calls": [],
                 "empty_retry": True,
                 "stop_reason": stop_reason
             })
+            time.sleep(15)
             # Retry without retry flag to avoid infinite loop
             return self._call_llm_stream(
                 retry_on_empty=False, 

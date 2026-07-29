@@ -3,6 +3,7 @@ Agent Bridge - Integrates Agent system with existing COW bridge
 """
 
 import os
+import time
 from typing import Optional, List
 
 from agent.protocol import Agent, LLMModel, LLMRequest
@@ -33,16 +34,30 @@ from agent.utils.hehe_harness import (
 )
 
 
-_CONN_ERROR_KEYWORDS = (
+_REQUEST_RETRY_DELAY_SECONDS = 15
+_REQUEST_MAX_RETRIES = 1
+_REQUEST_RETRYABLE_KEYWORDS = (
     "ssl", "eof", "connection", "timeout", "timed out", "network",
     "transport", "remoteprotocol", "readtimeout", "connecterror",
-    "apiconnection", "max retries exceeded", "communicating with openai",
+    "apiconnection", "rate limit", "overloaded", "unavailable", "busy",
+    "429", "500", "502", "503", "504", "512",
 )
 
-def _is_conn_error_msg(msg: str) -> bool:
-    """根据错误消息判断是否为连接/SSL 类错误（应立即触发 fallback）。"""
+def _is_retryable_request_error(msg: str) -> bool:
+    """Return whether a failed provider request is safe to retry once."""
     lower = msg.lower()
-    return any(k in lower for k in _CONN_ERROR_KEYWORDS)
+    return any(k in lower for k in _REQUEST_RETRYABLE_KEYWORDS)
+
+
+def _chunk_has_response_payload(chunk: dict) -> bool:
+    """Detect content that could already have reached the user or tool runner."""
+    if not isinstance(chunk, dict):
+        return False
+    choices = chunk.get("choices") or []
+    if not choices:
+        return False
+    delta = choices[0].get("delta") or {}
+    return bool(delta.get("content") or delta.get("tool_calls"))
 
 
 def _image_to_data_url(image_path: str) -> str:
@@ -343,9 +358,9 @@ class AgentLLMModel(LLMModel):
             formatted = self._format_stream_chunk(chunk)
             if isinstance(formatted, dict) and formatted.get('error'):
                 msg = formatted.get('message', 'API error')
-                # 连接/SSL 类错误 raise 触发 fallback；过载/限速等 API 错误走 error chunk 让上层重试
-                if _is_conn_error_msg(msg):
-                    raise Exception(msg)
+                # Raise every provider error here so call_stream owns the one
+                # sequential retry and never leaks two competing responses.
+                raise Exception(msg)
             yield formatted
 
     def _make_fallback_bot(self):
@@ -371,24 +386,70 @@ class AgentLLMModel(LLMModel):
 
     def call_stream(self, request: LLMRequest):
         """
-        Call the model with streaming. On API error, retry with fallback_model if configured.
+        Stream from the primary model with one sequential retry after 15 seconds.
+
+        A retry is only allowed before any text or tool call has been emitted.
+        This prevents a late/partial first response from being combined with a
+        second response. Fallback runs only after the primary retry is exhausted.
         """
         from config import conf
         fallback_model = conf().get("fallback_model", "")
-        try:
-            yield from self._stream_with_model(request, self.model)
-        except Exception as e:
-            logger.error(f"AgentLLMModel call_stream error (model={self.model}): {e}", exc_info=True)
-            if fallback_model:
-                logger.warning(f"[AgentLLMModel] switching to fallback model: {fallback_model!r}")
-                try:
-                    fallback_bot = self._make_fallback_bot()
-                    yield from self._stream_with_model(request, fallback_model, bot=fallback_bot)
-                except Exception as fe:
-                    logger.error(f"[AgentLLMModel] fallback model also failed: {fe}", exc_info=True)
-                    raise fe
-            else:
-                raise
+        primary_error = None
+        primary_error_is_retryable = False
+
+        for attempt in range(_REQUEST_MAX_RETRIES + 1):
+            emitted_payload = False
+            try:
+                for chunk in self._stream_with_model(request, self.model):
+                    if _chunk_has_response_payload(chunk):
+                        emitted_payload = True
+                    yield chunk
+                return
+            except Exception as e:
+                primary_error = e
+                primary_error_is_retryable = _is_retryable_request_error(str(e))
+                logger.error(
+                    f"AgentLLMModel call_stream error "
+                    f"(model={self.model}, attempt={attempt + 1}): {e}",
+                    exc_info=True,
+                )
+
+                if emitted_payload:
+                    logger.warning(
+                        "[AgentLLMModel] partial response already emitted; "
+                        "skip retry and fallback to prevent conflicting responses"
+                    )
+                    raise RuntimeError(f"[PARTIAL_RESPONSE_ABORT] {e}") from e
+
+                can_retry = (
+                    attempt < _REQUEST_MAX_RETRIES
+                    and primary_error_is_retryable
+                )
+                if can_retry:
+                    logger.warning(
+                        f"[AgentLLMModel] retrying primary model once in "
+                        f"{_REQUEST_RETRY_DELAY_SECONDS}s"
+                    )
+                    time.sleep(_REQUEST_RETRY_DELAY_SECONDS)
+                    continue
+                break
+
+        if fallback_model and primary_error_is_retryable:
+            logger.warning(f"[AgentLLMModel] switching to fallback model: {fallback_model!r}")
+            try:
+                fallback_bot = self._make_fallback_bot()
+                yield from self._stream_with_model(request, fallback_model, bot=fallback_bot)
+                return
+            except Exception as fallback_error:
+                logger.error(
+                    f"[AgentLLMModel] fallback model also failed: {fallback_error}",
+                    exc_info=True,
+                )
+                raise RuntimeError(
+                    f"[REQUEST_RETRY_EXHAUSTED] {fallback_error}"
+                ) from fallback_error
+
+        raise RuntimeError(f"[REQUEST_RETRY_EXHAUSTED] {primary_error}") from primary_error
     
     def _format_response(self, response):
         """Format Claude response to our expected format"""
