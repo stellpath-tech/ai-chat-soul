@@ -1,4 +1,4 @@
-from models.openai_compatible_bot import OpenAICompatibleBot
+from models.openai_compatible_bot import OpenAICompatibleBot, _is_connection_error
 
 
 class CapturingBot(OpenAICompatibleBot):
@@ -58,3 +58,7 @@ def test_non_qwen_models_do_not_receive_thinking_parameter():
 
     assert "enable_thinking" not in params
     assert "extra_body" not in params
+
+
+def test_non_connection_error_is_safe_with_openai_v0():
+    assert _is_connection_error(ValueError("invalid request")) is False

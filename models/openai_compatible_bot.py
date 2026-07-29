@@ -23,8 +23,14 @@ def _is_connection_error(exc: Exception) -> bool:
     module = getattr(type(exc), "__module__", "") or ""
     if "httpx" in module or "ssl" in module:
         return True
-    # openai SDK 把底层连接错误包装成 APIConnectionError
-    if isinstance(exc, openai.APIConnectionError):
+    # openai SDK 把底层连接错误包装成 APIConnectionError。
+    # v1 exposes it at openai.APIConnectionError; v0.x uses
+    # openai.error.APIConnectionError.
+    connection_error_type = getattr(openai, "APIConnectionError", None)
+    if connection_error_type is None:
+        error_module = getattr(openai, "error", None)
+        connection_error_type = getattr(error_module, "APIConnectionError", None)
+    if connection_error_type is not None and isinstance(exc, connection_error_type):
         return True
     return False
 
