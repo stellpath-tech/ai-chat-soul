@@ -1,7 +1,7 @@
 # 生产日记部署
 
 日记生成运行在 `ai-chat-soul` Web 进程的独立后台线程中。每天到达用户本地时间
-`diary_generation_hour` 后，worker 为该用户生成前一天的日记。任务通过 `user_diary`
+`diary_generation_hour` 后，worker 按 `diary_generation_day_offset` 为该用户生成日记；`0` 表示当天，`1` 表示前一天。任务通过 `user_diary`
 表认领，因此进程重启后可以继续重试，不依赖内存中的任务状态。
 
 ## 第一阶段：只生成文字
@@ -11,7 +11,8 @@
 ```json
 {
   "diary_worker_enabled": true,
-  "diary_generation_hour": 1,
+  "diary_generation_hour": 23,
+  "diary_generation_day_offset": 0,
   "diary_worker_poll_seconds": 300,
   "diary_quiet_message_threshold": 3,
   "diary_max_chars": 120,

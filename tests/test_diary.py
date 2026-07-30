@@ -1,6 +1,7 @@
 import os
-import json
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import channel.web.database as db
 from channel.web.diary import service
 from channel.web.diary import storage
+from channel.web.diary import worker
 
 
 class DiaryDatabaseTest(unittest.TestCase):
@@ -62,22 +64,24 @@ class DiaryDatabaseTest(unittest.TestCase):
 
     def test_full_text_generation_writes_diary_and_card(self):
         db.create_or_reset_diary_job(self.user_id, "2026-07-09")
-        model_output = {
-            "title": "风吹过的小路",
-            "summary": "今天记住了一次散步",
-            "diary": "今天听见你说去散步了，我就把那阵轻轻的风收进谷仓，放在离你最近的小抽屉里，路边晃动的叶子也被我悄悄记住了，等你下次回来时再一起看看，我会把软软的位置一直留在这里",
-            "image_prompts": [{"scene": "满仓陪用户在暖色小路上散步"}],
-        }
+        key_moment_output = "1：用户把今天散步的小事分享给了满仓"
+        diary_output = (
+            "今天听见你说去散步了，我就把那阵轻轻的风收进谷仓的小抽屉里。"
+            "路边晃动的叶子也被我悄悄记住，和暖暖的光放在了一起。\n\n"
+            "等你下次回来时，我们再一起看看，我会把软软的位置一直留在这里。"
+            "普通的小事被认真讲给我听以后，也会变成值得珍藏的小满足。"
+        )
         settings = {
             "diary_quiet_message_threshold": 0,
-            "diary_max_chars": 100,
+            "diary_v29_min_chars": 20,
+            "diary_v29_max_chars": 700,
             "diary_image_enabled": False,
             "diary_max_retries": 3,
         }
         configured = lambda name, default=None: settings.get(name, default)
         user = db.list_active_users_for_diary()[0]
         with patch.object(service, "_configured", side_effect=configured), patch.object(
-            service, "_call_chat_model", return_value=json.dumps(model_output, ensure_ascii=False),
+            service, "_call_chat_model", side_effect=[key_moment_output, diary_output],
         ):
             result = service.generate_user_diary(user, "2026-07-09")
         self.assertEqual("DONE", result["state"])
@@ -86,7 +90,8 @@ class DiaryDatabaseTest(unittest.TestCase):
             card = conn.execute("SELECT * FROM user_chat_message WHERE message_type = 'card'").fetchone()
         self.assertEqual("DONE", diary["state"])
         self.assertEqual("normal", diary["mode"])
-        self.assertEqual("风吹过的小路", card["diary_title"])
+        self.assertEqual("满仓的日记", card["diary_title"])
+        self.assertIn("\n\n", diary["content"])
 
 
 class DiaryServiceTest(unittest.TestCase):
@@ -97,11 +102,21 @@ class DiaryServiceTest(unittest.TestCase):
         self.assertEqual("2026-07-09 15:00:00", start)
         self.assertEqual("2026-07-10 15:00:00", end)
 
-    def test_validation_does_not_truncate_long_diary(self):
-        content = "我把今天温柔地放进谷仓的小抽屉里" * 20
+    def test_validation_preserves_v29_paragraphs(self):
+        content = ("我把今天温柔地放进谷仓的小抽屉里。" * 8
+                   + "\n\n"
+                   + "夜里再翻出来时，还能摸到一点暖暖的光。" * 8)
         normalized = service._normalize_diary(content)
         self.assertEqual(content, normalized)
-        self.assertEqual([], service._validate_diary({"diary": normalized}, 120))
+        self.assertEqual([], service._validate_diary(normalized, 80, 700))
+
+    def test_v29_key_moments_build_one_composite_image(self):
+        moments = service._parse_key_moments("1：一起散步\n2：分享了晚饭\n补充说明")
+        self.assertEqual(["一起散步", "分享了晚饭"], moments)
+        prompts = service._build_image_prompts(moments)
+        self.assertEqual(1, len(prompts))
+        self.assertIn("共 2 条", prompts[0]["positive_prompt"])
+        self.assertIn("1：一起散步", prompts[0]["positive_prompt"])
 
     def test_local_image_storage_returns_public_url(self):
         fake_config = {
@@ -114,6 +129,45 @@ class DiaryServiceTest(unittest.TestCase):
             url = storage.store_diary_image(7, "2026-07-09", "abc", b"png", "image/png")
             self.assertTrue(url.startswith("https://cdn.example.test/diary-images/diary/"))
             self.assertNotIn("2026-07-09", url)
+
+
+class DiaryWorkerTest(unittest.TestCase):
+    def test_scheduled_generation_runs_at_most_five_in_parallel(self):
+        users = [
+            {"id": user_id, "tz_iana": "Asia/Shanghai", "tz_offset_min": 480}
+            for user_id in range(1, 11)
+        ]
+        settings = {
+            "diary_generation_hour": 23,
+            "diary_generation_day_offset": 0,
+            "diary_generation_workers": 5,
+        }
+        active = 0
+        peak = 0
+        lock = threading.Lock()
+
+        def generate(user, diary_date):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return {"state": "DONE"}
+
+        with patch.object(worker, "conf", return_value=settings), patch.object(
+            worker.db, "list_active_users_for_diary", return_value=users,
+        ), patch.object(
+            worker.db, "create_or_reset_diary_job", return_value={"state": "GENERATING"},
+        ), patch.object(worker, "generate_user_diary", side_effect=generate):
+            processed = worker.run_scheduled_diaries_once(
+                datetime(2026, 7, 16, 15, 0, tzinfo=timezone.utc),
+            )
+
+        self.assertEqual(10, len(processed))
+        self.assertEqual(5, peak)
+        self.assertEqual({"2026-07-16"}, {item["date"] for item in processed})
 
 
 if __name__ == "__main__":

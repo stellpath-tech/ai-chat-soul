@@ -14,9 +14,9 @@ import channel.web.database as db
 from channel.web.diary.prompts import (
     IMAGE_NEGATIVE_PROMPT,
     IMAGE_POSITIVE_PROMPT,
+    KEY_MOMENT_SYSTEM_PROMPT,
     PRODUCT_DIARY_SYSTEM_PROMPT,
-    QUIET_DIARY_SYSTEM_PROMPT,
-    QUIET_SCENES,
+    REFERENCE_IMAGE,
 )
 from channel.web.diary.storage import decode_image_base64, store_diary_image
 from channel.web.push.service import deliver_generated_diary_notification
@@ -172,45 +172,65 @@ def _build_transcript(messages):
 
 
 def _generate_text(diary_date, transcript, resolved_mode):
-    max_chars = max(60, int(_configured("diary_max_chars", 120)))
-    scene = _quiet_scene(diary_date) if resolved_mode == "quiet" else ""
-    user_prompt = """生成 {date} 的满仓日记。
+    min_chars = max(80, int(_configured("diary_v29_min_chars", 160)))
+    max_chars = max(min_chars, int(_configured("diary_v29_max_chars", 700)))
+    transcript_json = json.dumps(transcript, ensure_ascii=False)
+    key_moment_prompt = """请为 {date} 提炼满仓日记的 key moments。
 模式：{mode}
-目标正文长度：约 {max_chars} 字，允许自然浮动，但不能截断句子。
-安静日场景：{scene}
-聊天记录：
+聊天记录（按时间顺序，必须只依据这些内容）：
 {transcript}
 """.format(
         date=diary_date,
         mode=resolved_mode,
-        max_chars=max_chars,
-        scene=scene or "无",
-        transcript=json.dumps(transcript, ensure_ascii=False),
+        transcript=transcript_json,
     )
-    system_prompt = PRODUCT_DIARY_SYSTEM_PROMPT
-    if resolved_mode == "quiet":
-        system_prompt += "\n\n" + QUIET_DIARY_SYSTEM_PROMPT
 
     last_error = None
     for attempt in range(2):
         try:
-            output = _call_chat_model(system_prompt, user_prompt)
-            parsed = _parse_json_object(output)
-            parsed["diary"] = _normalize_diary(parsed.get("diary"))
-            errors = _validate_diary(parsed, max_chars)
+            key_output = _call_chat_model(
+                KEY_MOMENT_SYSTEM_PROMPT, key_moment_prompt, max_tokens=1800,
+            )
+            key_moments = _parse_key_moments(key_output)
+            if not key_moments:
+                raise ValueError("key moment stage returned no usable moments")
+
+            numbered_moments = "\n".join(
+                "{}：{}".format(index + 1, moment)
+                for index, moment in enumerate(key_moments)
+            )
+            diary_prompt = """请为 {date} 写满仓的完整日记正文。
+模式：{mode}
+请严格围绕以下 key moments 写作：
+{moments}
+
+只输出日记正文，不要输出标题、解释、编号或 key moments 列表。
+""".format(
+                date=diary_date,
+                mode=resolved_mode,
+                moments=numbered_moments,
+            )
+            output = _call_chat_model(
+                PRODUCT_DIARY_SYSTEM_PROMPT, diary_prompt, max_tokens=2200,
+            )
+            content = _normalize_diary(output)
+            errors = _validate_diary(content, min_chars, max_chars)
             if errors:
                 raise ValueError("; ".join(errors))
-            parsed["image_prompts"] = _normalize_image_prompts(
-                parsed.get("image_prompts"), resolved_mode, scene,
-            )
-            return parsed
+            return {
+                "title": "满仓的日记",
+                "summary": key_moments[0][:80],
+                "diary": content,
+                "key_moments": key_moments,
+                "image_prompts": _build_image_prompts(key_moments),
+            }
         except Exception as error:
             last_error = error
-            user_prompt += "\n上次输出未通过校验：{}。请重新输出完整 JSON。".format(error)
+            key_moment_prompt += "\n上次生成未通过校验：{}。请重新严格按 v29 规则输出。".format(error)
     raise last_error or RuntimeError("diary text generation failed")
 
 
-def _call_chat_model(system_prompt, user_prompt):
+def _call_chat_model(system_prompt, user_prompt, max_tokens=2200):
     api_key = str(_configured("diary_text_api_key", "") or _configured("open_ai_api_key", "") or "")
     api_base = str(_configured("diary_text_api_base", "") or _configured("open_ai_api_base", "https://api.openai.com/v1")).rstrip("/")
     model = str(_configured("diary_text_model", "") or _configured("model", ""))
@@ -224,80 +244,83 @@ def _call_chat_model(system_prompt, user_prompt):
         ],
         "temperature": 0.4,
         "top_p": 0.9,
-        "max_tokens": 1200,
-        "response_format": {"type": "json_object"},
+        "max_tokens": int(max_tokens),
         "stream": False,
     }
     headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
     response = requests.post(
         api_base + "/chat/completions", headers=headers, json=payload, timeout=(10, 120),
     )
-    if response.status_code == 400 and "response_format" in response.text:
-        payload.pop("response_format", None)
-        response = requests.post(
-            api_base + "/chat/completions", headers=headers, json=payload, timeout=(10, 120),
-        )
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"]
 
 
-def _parse_json_object(value):
+def _parse_key_moments(value):
     text = str(value or "").strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("model output is not a JSON object")
-    parsed = json.loads(text[start:end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("model output is not a JSON object")
-    return parsed
+    numbered = []
+    fallback = []
+    for line in text.splitlines():
+        match = re.match(r"^\s*\d+\s*[.、)：:]\s*(.+?)\s*$", line)
+        cleaned = (match.group(1) if match else re.sub(r"^\s*[-*•]\s*", "", line)).strip()
+        if not cleaned or cleaned in ("无", "（无）", "(无)"):
+            continue
+        if match:
+            numbered.append(cleaned)
+        else:
+            fallback.append(cleaned)
+    return (numbered or fallback)[:4]
 
 
 def _normalize_diary(value):
-    return re.sub(r"\s+", "", str(value or "")).strip()
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    paragraphs = [re.sub(r"[ \t]+", "", part).strip() for part in re.split(r"\n+", text)]
+    return "\n\n".join(part for part in paragraphs if part)
 
 
-def _validate_diary(output, max_chars):
-    content = str(output.get("diary") or "")
+def _validate_diary(content, min_chars=None, max_chars=None):
+    content = str(content or "")
+    min_chars = max(80, int(min_chars if min_chars is not None else _configured("diary_v29_min_chars", 160)))
+    max_chars = max(min_chars, int(max_chars if max_chars is not None else _configured("diary_v29_max_chars", 700)))
     errors = []
     if not content:
         errors.append("diary is empty")
     if re.search(r"AI|模型|prompt|规则|系统设定", content, flags=re.I):
         errors.append("diary contains technical wording")
-    if len(content) < max(30, int(max_chars * 0.55)):
+    if len(content) < min_chars:
         errors.append("diary is too short")
-    if "\n" in content:
-        errors.append("diary contains line breaks")
+    if len(content) > max_chars:
+        errors.append("diary is too long")
+    paragraph_count = len([part for part in content.split("\n\n") if part.strip()])
+    if paragraph_count < 2 or paragraph_count > 7:
+        errors.append("diary must contain 2-7 paragraphs")
     return errors
 
 
-def _quiet_scene(seed):
-    index = int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16) % len(QUIET_SCENES)
-    return QUIET_SCENES[index]
-
-
-def _normalize_image_prompts(value, resolved_mode, quiet_scene):
-    prompts = value if isinstance(value, list) else []
-    scenes = []
-    for item in prompts[:2]:
-        scene = item.get("scene") if isinstance(item, dict) else item
-        if str(scene or "").strip():
-            scenes.append(str(scene).strip())
-    if not scenes:
-        scenes = [quiet_scene if resolved_mode == "quiet" else "满仓陪在用户身边，记录今天温柔的生活片段"]
+def _build_image_prompts(key_moments):
+    moments = [str(moment).strip() for moment in key_moments[:4] if str(moment).strip()]
+    if not moments:
+        return []
+    numbered_moments = "\n".join(
+        "{}：{}".format(index + 1, moment)
+        for index, moment in enumerate(moments)
+    )
     return [{
-        "scene": scene,
-        "positive_prompt": IMAGE_POSITIVE_PROMPT + "\n具体场景：" + scene,
+        "scene": "；".join(moments),
+        "positive_prompt": (
+            IMAGE_POSITIVE_PROMPT
+            + "\n\n【已填写的 key moments（共 {} 条，请严格生成 {} 个拼接小画面）】：\n".format(
+                len(moments), len(moments),
+            )
+            + numbered_moments
+        ),
         "negative_prompt": IMAGE_NEGATIVE_PROMPT,
-    } for scene in scenes]
+    }]
 
 
 def _generate_images(user_id, diary_date, prompts, resolved_mode):
-    count = max(1, min(2, int(_configured("diary_image_count", 1))))
     results = []
-    for index, prompt in enumerate(prompts[:count]):
+    for index, prompt in enumerate(prompts[:1]):
         try:
             image_bytes, content_type = _call_image_model(prompt)
             public_url = store_diary_image(
@@ -324,15 +347,29 @@ def _call_image_model(prompt):
         "size": str(_configured("diary_image_size", "1024x1024")),
         "quality": str(_configured("diary_image_quality", "medium")),
     }
-    headers = {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"}
+    headers = {"Authorization": "Bearer " + api_key}
+    use_reference = bool(_configured("diary_reference_image_enabled", True)) and bool(REFERENCE_IMAGE)
+    reference_bytes = decode_image_base64(REFERENCE_IMAGE) if use_reference else None
     last_error = None
     for attempt in range(4):
         if attempt:
             time.sleep((2, 5, 10)[attempt - 1])
         try:
-            response = requests.post(
-                api_base + "/images/generations", headers=headers, json=payload, timeout=(10, 180),
-            )
+            if reference_bytes:
+                response = requests.post(
+                    api_base + "/images/edits",
+                    headers=headers,
+                    data=payload,
+                    files={"image": ("mancang-v29-reference.png", reference_bytes, "image/png")},
+                    timeout=(10, 180),
+                )
+            else:
+                response = requests.post(
+                    api_base + "/images/generations",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=(10, 180),
+                )
             response.raise_for_status()
             item = response.json()["data"][0]
             if item.get("b64_json"):

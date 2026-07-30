@@ -14,6 +14,7 @@ agentmesh-sdk>=0.1.3
 python-dotenv>=1.0.0
 PyYAML>=6.0
 croniter>=2.0.0
+prometheus-client>=0.25.0
 
 # wechatcom & wechatmp
 web.py
