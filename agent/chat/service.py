@@ -38,6 +38,15 @@ class ChatService:
         :param session_id: session identifier for agent isolation
         :param send_chunk_fn: callable(chunk_data: dict) to send a streaming chunk
         """
+        from agent.chat.reply_mode import classify_reply_mode
+
+        reply_mode = classify_reply_mode(query)
+
+        def send_chunk_with_reply_mode(chunk: dict):
+            payload = dict(chunk)
+            payload["reply_mode"] = reply_mode
+            send_chunk_fn(payload)
+
         agent = self.agent_bridge.get_agent(session_id=session_id)
         if agent is None:
             raise RuntimeError("Failed to initialise agent for the session")
@@ -54,7 +63,7 @@ class ChatService:
                 # Incremental text delta
                 delta = data.get("delta", "")
                 if delta:
-                    send_chunk_fn({
+                    send_chunk_with_reply_mode({
                         "chunk_type": "content",
                         "delta": delta,
                         "segment_id": state.segment_id,
@@ -99,7 +108,7 @@ class ChatService:
                 has_tool_calls = data.get("has_tool_calls", False)
                 if has_tool_calls and state.pending_tool_results:
                     # Flush collected tool results as a single tool_calls chunk
-                    send_chunk_fn({
+                    send_chunk_with_reply_mode({
                         "chunk_type": "tool_calls",
                         "tool_calls": state.pending_tool_results,
                     })

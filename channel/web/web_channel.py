@@ -177,6 +177,7 @@ class WebChannel(ChatChannel):
                 logger.error("No request_id found in context, cannot send message")
                 return
 
+            reply_mode = context.get("reply_mode")
             _start_time = context.get("llm_start_time")
             _latency_ms = int((time.time() - _start_time) * 1000) if _start_time else None
             event_log.log(
@@ -190,6 +191,7 @@ class WebChannel(ChatChannel):
                 source=context.get("source", ""),
                 reply_type=str(reply.type) if reply.type else None,
                 reply_content=reply.content if reply.content is not None else "",
+                reply_mode=reply_mode,
                 latency_ms=_latency_ms,
             )
 
@@ -223,7 +225,8 @@ class WebChannel(ChatChannel):
                     "content": content,
                     "request_id": request_id,
                     "timestamp": time.time(),
-                    "message_id": message_id
+                    "message_id": message_id,
+                    "reply_mode": reply_mode,
                 })
                 logger.debug(f"SSE done sent for request {request_id}")
                 return
@@ -234,7 +237,8 @@ class WebChannel(ChatChannel):
                     "type": str(reply.type),
                     "content": reply.content,
                     "timestamp": time.time(),
-                    "request_id": request_id
+                    "request_id": request_id,
+                    "reply_mode": reply_mode,
                 }
                 self.session_queues[session_id].put(response_data)
                 logger.debug(f"Response sent to poll queue for session {session_id}, request {request_id}")
@@ -276,7 +280,12 @@ class WebChannel(ChatChannel):
             )
             logger.exception(f"[WebChannel] produce failed for request {request_id}: {e}")
 
-    def _make_sse_callback(self, request_id: str, log_ctx: dict = None):
+    def _make_sse_callback(
+        self,
+        request_id: str,
+        log_ctx: dict = None,
+        reply_mode=None,
+    ):
         """Build an on_event callback that pushes agent stream events into the SSE queue."""
         log_ctx = log_ctx or {}
 
@@ -290,12 +299,21 @@ class WebChannel(ChatChannel):
             if event_type == "message_update":
                 delta = data.get("delta", "")
                 if delta:
-                    q.put({"type": "delta", "content": delta})
+                    q.put({
+                        "type": "delta",
+                        "content": delta,
+                        "reply_mode": reply_mode,
+                    })
 
             elif event_type == "tool_execution_start":
                 tool_name = data.get("tool_name", "tool")
                 arguments = data.get("arguments", {})
-                q.put({"type": "tool_start", "tool": tool_name, "arguments": arguments})
+                q.put({
+                    "type": "tool_start",
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "reply_mode": reply_mode,
+                })
 
             elif event_type == "tool_execution_end":
                 tool_name = data.get("tool_name", "tool")
@@ -314,7 +332,8 @@ class WebChannel(ChatChannel):
                     "tool": tool_name,
                     "status": status,
                     "result": sse_result,
-                    "execution_time": round(exec_time, 2)
+                    "execution_time": round(exec_time, 2),
+                    "reply_mode": reply_mode,
                 })
                 event_log.log(
                     "tool_call",
@@ -658,6 +677,11 @@ class WebChannel(ChatChannel):
             request_id = self._generate_request_id()
             self.request_to_session[request_id] = session_id
 
+            # The classifier returns a per-turn mode switch directive:
+            # voice/text when explicitly requested, otherwise None.
+            from agent.chat.reply_mode import classify_reply_mode
+            reply_mode = classify_reply_mode(prompt, request_id=request_id)
+
             if session_id not in self.session_queues:
                 self.session_queues[session_id] = Queue()
 
@@ -691,6 +715,7 @@ class WebChannel(ChatChannel):
                 context["user_id"] = user_id
                 context["user_group"] = user_group
                 context["phone_number"] = phone_number
+                context["reply_mode"] = reply_mode
 
                 _log_ctx = {
                     "user_id": user_id,
@@ -712,7 +737,11 @@ class WebChannel(ChatChannel):
                 )
 
                 if use_sse:
-                    context["on_event"] = self._make_sse_callback(request_id, _log_ctx)
+                    context["on_event"] = self._make_sse_callback(
+                        request_id,
+                        _log_ctx,
+                        reply_mode,
+                    )
 
                 if source == "DEVICE" and device_id:
                     self._push_chatlog(device_id, "user", f"[图片]{(' ' + prompt) if prompt else ''}")
@@ -745,7 +774,8 @@ class WebChannel(ChatChannel):
                     "status": "success",
                     "request_id": request_id,
                     "stream": use_sse,
-                    "message_id": message_id
+                    "message_id": message_id,
+                    "reply_mode": reply_mode,
                 })
 
             # ---------- 图片消息（base64）----------
@@ -779,6 +809,7 @@ class WebChannel(ChatChannel):
                 context["user_id"] = user_id
                 context["user_group"] = user_group
                 context["phone_number"] = phone_number
+                context["reply_mode"] = reply_mode
 
                 _log_ctx = {
                     "user_id": user_id,
@@ -800,7 +831,11 @@ class WebChannel(ChatChannel):
                 )
 
                 if use_sse:
-                    context["on_event"] = self._make_sse_callback(request_id, _log_ctx)
+                    context["on_event"] = self._make_sse_callback(
+                        request_id,
+                        _log_ctx,
+                        reply_mode,
+                    )
 
 
                 if source == "DEVICE" and device_id:
@@ -822,7 +857,8 @@ class WebChannel(ChatChannel):
                     "status": "success",
                     "request_id": request_id,
                     "stream": use_sse,
-                    "message_id": message_id
+                    "message_id": message_id,
+                    "reply_mode": reply_mode,
                 })
 
             # ---------- 文本消息 ----------
@@ -853,6 +889,7 @@ class WebChannel(ChatChannel):
             context["user_id"] = user_id
             context["user_group"] = user_group
             context["phone_number"] = phone_number
+            context["reply_mode"] = reply_mode
 
             _log_ctx = {
                 "user_id": user_id,
@@ -873,7 +910,11 @@ class WebChannel(ChatChannel):
             )
 
             if use_sse:
-                context["on_event"] = self._make_sse_callback(request_id, _log_ctx)
+                context["on_event"] = self._make_sse_callback(
+                    request_id,
+                    _log_ctx,
+                    reply_mode,
+                )
 
             # DEVICE 来源：将用户消息写入聊天记录队列
             if source == "DEVICE" and device_id:
@@ -890,7 +931,8 @@ class WebChannel(ChatChannel):
                 "status": "success",
                 "request_id": request_id,
                 "stream": use_sse,
-                "message_id": message_id
+                "message_id": message_id,
+                "reply_mode": reply_mode,
             })
 
         except Exception as e:
@@ -1001,7 +1043,8 @@ class WebChannel(ChatChannel):
                     "has_content": True,
                     "content": response["content"],
                     "request_id": response["request_id"],
-                    "timestamp": response["timestamp"]
+                    "timestamp": response["timestamp"],
+                    "reply_mode": response.get("reply_mode"),
                 })
                 
             except Empty:
