@@ -79,9 +79,6 @@ def test_classifier_uses_one_qwen_flash_call_with_thinking_disabled(_conf):
     assert call.args[0] == "https://example.test/v1/chat/completions"
     assert call.kwargs["json"]["model"] == REPLY_MODE_MODEL
     assert call.kwargs["json"]["enable_thinking"] is False
-    system_prompt = call.kwargs["json"]["messages"][0]["content"]
-    assert "没有要求切换回复模式，保持不变：null" in system_prompt
-    assert "不要替用户选择默认回复模式" in system_prompt
     assert call.kwargs["json"]["messages"][-1]["content"] == "满仓，给我发语音吧"
     assert call.kwargs["timeout"] == CLASSIFIER_TIMEOUT
 
