@@ -876,11 +876,13 @@ class AgentBridge:
 
             # Keep this after all other per-turn blocks so the selected reply
             # mode is the final sentence in the system prompt.
-            from agent.chat.reply_mode import append_reply_mode_instruction
-            append_system = append_reply_mode_instruction(
-                append_system,
-                context.get("reply_mode") if context else None,
-            )
+            if context and "parent_reply_mode" in context:
+                from agent.chat.reply_mode import append_reply_mode_instruction
+                append_system = append_reply_mode_instruction(
+                    append_system,
+                    context.get("reply_mode"),
+                    context.get("parent_reply_mode"),
+                )
 
             try:
                 # Use agent's run_stream method with event handler

@@ -24,9 +24,9 @@ except Exception:
 REPLY_MODE_MODEL = "qwen3.5-flash"
 REPLY_MODES = {"voice", "text"}
 CLASSIFIER_TIMEOUT = (3, 10)
-REPLY_MODE_SYSTEM_INSTRUCTIONS = {
-    "voice": "当前回复模式已经切换为语音模式。",
-    "text": "当前回复模式已经切换为文字模式。",
+REPLY_MODE_LABELS = {
+    "voice": "语音",
+    "text": "文字",
 }
 
 _SYSTEM_PROMPT = """你是聊天回复形式的意图分类器。只判断用户最新一条消息是否明确要求助手改变回复形式。
@@ -48,14 +48,31 @@ _SYSTEM_PROMPT = """你是聊天回复形式的意图分类器。只判断用户
 """
 
 
+def normalize_parent_reply_mode(parent_reply_mode: Optional[str]) -> str:
+    """Normalize the client-reported current mode, defaulting to text."""
+    value = str(parent_reply_mode or "").strip().lower()
+    return value if value in REPLY_MODES else "text"
+
+
+def reply_mode_system_instruction(
+    reply_mode: Optional[str],
+    parent_reply_mode: Optional[str],
+) -> str:
+    """Build one of the four current-mode state sentences."""
+    parent_mode = normalize_parent_reply_mode(parent_reply_mode)
+    next_mode = reply_mode if reply_mode in REPLY_MODES else parent_mode
+    changed = reply_mode in REPLY_MODES and next_mode != parent_mode
+    action = "已经切换为" if changed else "保持为"
+    return f"当前的回复模式{action}{REPLY_MODE_LABELS[next_mode]}。"
+
+
 def append_reply_mode_instruction(
     system_prompt: Optional[str],
     reply_mode: Optional[str],
-) -> Optional[str]:
-    """Append the per-turn reply mode state as the final system sentence."""
-    instruction = REPLY_MODE_SYSTEM_INSTRUCTIONS.get(reply_mode)
-    if not instruction:
-        return system_prompt
+    parent_reply_mode: Optional[str],
+) -> str:
+    """Append the resolved current-mode state as the final system sentence."""
+    instruction = reply_mode_system_instruction(reply_mode, parent_reply_mode)
     base = str(system_prompt or "").strip()
     return f"{base}\n\n{instruction}" if base else instruction
 

@@ -215,13 +215,19 @@ class CloudClient(LinkAIClient):
         payload = data.get("payload", {})
         query = payload.get("query", "")
         session_id = payload.get("session_id", "cloud_console")
+        parent_reply_mode = payload.get("parent_reply_mode")
         logger.info(f"[CloudClient] on_chat: session={session_id}, query={query[:80]}")
 
         svc = self.chat_service
         if svc is None:
             raise RuntimeError("ChatService not available")
 
-        svc.run(query=query, session_id=session_id, send_chunk_fn=send_chunk_fn)
+        svc.run(
+            query=query,
+            session_id=session_id,
+            send_chunk_fn=send_chunk_fn,
+            parent_reply_mode=parent_reply_mode,
+        )
 
     # ------------------------------------------------------------------
     # channel restart helpers

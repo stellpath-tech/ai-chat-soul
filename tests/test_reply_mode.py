@@ -9,7 +9,9 @@ from agent.chat.reply_mode import (
     REPLY_MODE_MODEL,
     append_reply_mode_instruction,
     classify_reply_mode,
+    normalize_parent_reply_mode,
     parse_reply_mode,
+    reply_mode_system_instruction,
 )
 from agent.chat.service import ChatService
 from bridge.agent_bridge import AgentBridge
@@ -45,16 +47,35 @@ def test_parse_reply_mode_accepts_only_supported_directives():
     assert parse_reply_mode("not-json") is None
 
 
-def test_reply_mode_instruction_is_the_final_system_sentence():
+def test_reply_mode_instruction_covers_all_four_states():
     base = "基础设定\n\n[记忆]\n用户喜欢散步"
 
-    voice_prompt = append_reply_mode_instruction(base, "voice")
-    text_prompt = append_reply_mode_instruction(base, "text")
+    assert reply_mode_system_instruction("voice", "text") == (
+        "当前的回复模式已经切换为语音。"
+    )
+    assert reply_mode_system_instruction("text", "voice") == (
+        "当前的回复模式已经切换为文字。"
+    )
+    assert reply_mode_system_instruction(None, "voice") == (
+        "当前的回复模式保持为语音。"
+    )
+    assert reply_mode_system_instruction(None, "text") == (
+        "当前的回复模式保持为文字。"
+    )
+    assert reply_mode_system_instruction("voice", "voice") == (
+        "当前的回复模式保持为语音。"
+    )
+    assert reply_mode_system_instruction("text", "text") == (
+        "当前的回复模式保持为文字。"
+    )
 
-    assert voice_prompt.endswith("当前回复模式已经切换为语音模式。")
-    assert text_prompt.endswith("当前回复模式已经切换为文字模式。")
-    assert append_reply_mode_instruction(base, None) == base
-    assert append_reply_mode_instruction(base, "unknown") == base
+    voice_prompt = append_reply_mode_instruction(base, "voice", "text")
+    keep_text_prompt = append_reply_mode_instruction(base, None, "text")
+    assert voice_prompt.endswith("当前的回复模式已经切换为语音。")
+    assert keep_text_prompt.endswith("当前的回复模式保持为文字。")
+    assert normalize_parent_reply_mode("VOICE") == "voice"
+    assert normalize_parent_reply_mode(None) == "text"
+    assert normalize_parent_reply_mode("invalid") == "text"
 
 
 @patch(
@@ -186,6 +207,7 @@ def test_message_response_exposes_the_same_classification(
         return_value=json.dumps({
             "session_id": "reply-mode-post-session",
             "message": "满仓，发语音",
+            "parent_reply_mode": "text",
             "stream": True,
         }).encode("utf-8"),
     ), patch(
@@ -205,6 +227,7 @@ def test_message_response_exposes_the_same_classification(
         request_id=response["request_id"],
     )
     assert context.get("reply_mode") == "voice"
+    assert context.get("parent_reply_mode") == "text"
     fake_thread.start.assert_called_once()
 
 
@@ -264,11 +287,12 @@ def test_cloud_chat_chunks_carry_the_single_classification(
         query="别发语音，打字回复",
         session_id="cloud-session",
         send_chunk_fn=chunks.append,
+        parent_reply_mode="voice",
     )
 
     classify_mock.assert_called_once_with("别发语音，打字回复")
     assert _FakeExecutor.system_prompts == [
-        "system\n\n当前回复模式已经切换为文字模式。"
+        "system\n\n当前的回复模式已经切换为文字。"
     ]
     assert chunks == [
         {
@@ -323,9 +347,10 @@ def test_web_agent_appends_reply_mode_after_other_dynamic_blocks(
     bridge = object.__new__(AgentBridge)
     bridge.workspace_root = "~/cow"
     bridge.get_agent = Mock(return_value=agent)
-    context = Context(ContextType.TEXT, "发语音")
+    context = Context(ContextType.TEXT, "发语音", kwargs={})
     context["session_id"] = "reply-mode-web-agent"
     context["reply_mode"] = "voice"
+    context["parent_reply_mode"] = "text"
     context["append_system_prompt"] = "[其他动态状态]"
 
     reply = bridge.agent_reply("满仓，给我发语音", context=context)
@@ -334,5 +359,15 @@ def test_web_agent_appends_reply_mode_after_other_dynamic_blocks(
     assert agent.append_system == (
         "[其他动态状态]\n\n"
         "[记忆]\n用户喜欢散步\n\n"
-        "当前回复模式已经切换为语音模式。"
+        "当前的回复模式已经切换为语音。"
+    )
+
+    background_context = Context(ContextType.TEXT, "后台任务", kwargs={})
+    background_context["session_id"] = "reply-mode-background"
+    background_context["append_system_prompt"] = "[其他动态状态]"
+    bridge.agent_reply("执行后台任务", context=background_context)
+
+    assert agent.append_system == (
+        "[其他动态状态]\n\n"
+        "[记忆]\n用户喜欢散步"
     )

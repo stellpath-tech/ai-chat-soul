@@ -27,7 +27,13 @@ class ChatService:
         """
         self.agent_bridge = agent_bridge
 
-    def run(self, query: str, session_id: str, send_chunk_fn: Callable[[dict], None]):
+    def run(
+        self,
+        query: str,
+        session_id: str,
+        send_chunk_fn: Callable[[dict], None],
+        parent_reply_mode: Optional[str] = None,
+    ):
         """
         Run the agent for *query* and stream results back via *send_chunk_fn*.
 
@@ -37,6 +43,7 @@ class ChatService:
         :param query: user query text
         :param session_id: session identifier for agent isolation
         :param send_chunk_fn: callable(chunk_data: dict) to send a streaming chunk
+        :param parent_reply_mode: client-reported current mode before this turn
         """
         from agent.chat.reply_mode import (
             append_reply_mode_instruction,
@@ -130,6 +137,7 @@ class ChatService:
         full_system_prompt = append_reply_mode_instruction(
             full_system_prompt,
             reply_mode,
+            parent_reply_mode,
         )
 
         # Create a copy of messages for this execution
