@@ -24,24 +24,36 @@ except Exception:
 REPLY_MODE_MODEL = "qwen3.5-flash"
 REPLY_MODES = {"voice", "text"}
 CLASSIFIER_TIMEOUT = (3, 10)
+REPLY_MODE_SYSTEM_INSTRUCTIONS = {
+    "voice": "当前回复模式已经切换为语音模式。",
+    "text": "当前回复模式已经切换为文字模式。",
+}
 
-_SYSTEM_PROMPT = """你是聊天回复形式的意图分类器。只判断用户最新一条消息是否明确要求助手改变回复形式。
+_SYSTEM_PROMPT = """判断用户是否要求切换满仓对当前消息的回复模式。
 
-输出规则：
-- 明确要求助手/满仓用语音、声音、音频回复或发一段语音：voice
-- 明确要求助手不要用语音、关闭语音、改用文字或打字回复：text
-- 没有明确指定回复形式：null
+- 要求切换到语音回复：voice
+- 要求切换到文字回复：text
+- 没有要求切换回复模式，保持不变：null
 
-注意：
-- 仅仅提到“语音”、描述自己发过语音、讨论声音好不好听，不代表要求助手用语音回复。
-- 疑问、引用、假设和转述中没有真实指令时输出 null。
-- 只判断当前消息，不推断历史状态。
+不要替用户选择默认回复模式。
 
 只能输出以下 JSON 之一，不能解释：
 {"reply_mode":"voice"}
 {"reply_mode":"text"}
 {"reply_mode":null}
 """
+
+
+def append_reply_mode_instruction(
+    system_prompt: Optional[str],
+    reply_mode: Optional[str],
+) -> Optional[str]:
+    """Append the per-turn reply mode state as the final system sentence."""
+    instruction = REPLY_MODE_SYSTEM_INSTRUCTIONS.get(reply_mode)
+    if not instruction:
+        return system_prompt
+    base = str(system_prompt or "").strip()
+    return f"{base}\n\n{instruction}" if base else instruction
 
 
 def parse_reply_mode(raw: str) -> Optional[str]:

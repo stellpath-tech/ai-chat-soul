@@ -1,15 +1,18 @@
 import json
 import threading
 from queue import Queue
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from agent.chat.reply_mode import (
     CLASSIFIER_TIMEOUT,
     REPLY_MODE_MODEL,
+    append_reply_mode_instruction,
     classify_reply_mode,
     parse_reply_mode,
 )
 from agent.chat.service import ChatService
+from bridge.agent_bridge import AgentBridge
 from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
 from channel.web.web_channel import WebChannel
@@ -42,6 +45,18 @@ def test_parse_reply_mode_accepts_only_supported_directives():
     assert parse_reply_mode("not-json") is None
 
 
+def test_reply_mode_instruction_is_the_final_system_sentence():
+    base = "基础设定\n\n[记忆]\n用户喜欢散步"
+
+    voice_prompt = append_reply_mode_instruction(base, "voice")
+    text_prompt = append_reply_mode_instruction(base, "text")
+
+    assert voice_prompt.endswith("当前回复模式已经切换为语音模式。")
+    assert text_prompt.endswith("当前回复模式已经切换为文字模式。")
+    assert append_reply_mode_instruction(base, None) == base
+    assert append_reply_mode_instruction(base, "unknown") == base
+
+
 @patch(
     "agent.chat.reply_mode.conf",
     return_value={
@@ -64,6 +79,9 @@ def test_classifier_uses_one_qwen_flash_call_with_thinking_disabled(_conf):
     assert call.args[0] == "https://example.test/v1/chat/completions"
     assert call.kwargs["json"]["model"] == REPLY_MODE_MODEL
     assert call.kwargs["json"]["enable_thinking"] is False
+    system_prompt = call.kwargs["json"]["messages"][0]["content"]
+    assert "没有要求切换回复模式，保持不变：null" in system_prompt
+    assert "不要替用户选择默认回复模式" in system_prompt
     assert call.kwargs["json"]["messages"][-1]["content"] == "满仓，给我发语音吧"
     assert call.kwargs["timeout"] == CLASSIFIER_TIMEOUT
 
@@ -218,9 +236,12 @@ class _FakeBridge:
 
 
 class _FakeExecutor:
+    system_prompts = []
+
     def __init__(self, **kwargs):
         self.on_event = kwargs["on_event"]
         self.messages = kwargs["messages"]
+        self.system_prompts.append(kwargs["system_prompt"])
 
     def run_stream(self, query):
         self.on_event({
@@ -240,6 +261,7 @@ def test_cloud_chat_chunks_carry_the_single_classification(
     classify_mock,
 ):
     chunks = []
+    _FakeExecutor.system_prompts = []
 
     ChatService(_FakeBridge()).run(
         query="别发语音，打字回复",
@@ -248,6 +270,9 @@ def test_cloud_chat_chunks_carry_the_single_classification(
     )
 
     classify_mock.assert_called_once_with("别发语音，打字回复")
+    assert _FakeExecutor.system_prompts == [
+        "system\n\n当前回复模式已经切换为文字模式。"
+    ]
     assert chunks == [
         {
             "chunk_type": "content",
@@ -256,3 +281,61 @@ def test_cloud_chat_chunks_carry_the_single_classification(
             "reply_mode": "text",
         }
     ]
+
+
+class _FakeWebAgent:
+    def __init__(self):
+        self.runtime_info = {}
+        self.messages = []
+        self.tools = []
+        self.stream_executor = SimpleNamespace(files_to_send=[])
+        self.append_system = None
+
+    def run_stream(
+        self,
+        user_message,
+        on_event=None,
+        clear_history=False,
+        append_system=None,
+    ):
+        self.append_system = append_system
+        return "好的"
+
+
+@patch("agent.memory.user_cache.update_conversation")
+@patch(
+    "agent.memory.thing_memory.get_memory_block",
+    return_value="[记忆]\n用户喜欢散步",
+)
+@patch(
+    "config.conf",
+    return_value={
+        "enable_sensor_label": False,
+        "redline_input_filter_enabled": False,
+        "redline_output_filter_enabled": False,
+        "thing_memory_enabled": True,
+        "agent_workspace": "~/cow",
+    },
+)
+def test_web_agent_appends_reply_mode_after_other_dynamic_blocks(
+    _conf,
+    _memory,
+    _update_conversation,
+):
+    agent = _FakeWebAgent()
+    bridge = object.__new__(AgentBridge)
+    bridge.workspace_root = "~/cow"
+    bridge.get_agent = Mock(return_value=agent)
+    context = Context(ContextType.TEXT, "发语音")
+    context["session_id"] = "reply-mode-web-agent"
+    context["reply_mode"] = "voice"
+    context["append_system_prompt"] = "[其他动态状态]"
+
+    reply = bridge.agent_reply("满仓，给我发语音", context=context)
+
+    assert reply.type == ReplyType.TEXT
+    assert agent.append_system == (
+        "[其他动态状态]\n\n"
+        "[记忆]\n用户喜欢散步\n\n"
+        "当前回复模式已经切换为语音模式。"
+    )

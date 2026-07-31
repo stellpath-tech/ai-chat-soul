@@ -38,7 +38,10 @@ class ChatService:
         :param session_id: session identifier for agent isolation
         :param send_chunk_fn: callable(chunk_data: dict) to send a streaming chunk
         """
-        from agent.chat.reply_mode import classify_reply_mode
+        from agent.chat.reply_mode import (
+            append_reply_mode_instruction,
+            classify_reply_mode,
+        )
 
         reply_mode = classify_reply_mode(query)
 
@@ -124,6 +127,10 @@ class ChatService:
 
         # Get full system prompt with skills
         full_system_prompt = agent.get_full_system_prompt()
+        full_system_prompt = append_reply_mode_instruction(
+            full_system_prompt,
+            reply_mode,
+        )
 
         # Create a copy of messages for this execution
         with agent.messages_lock:

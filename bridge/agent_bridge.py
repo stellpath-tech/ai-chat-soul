@@ -874,6 +874,14 @@ class AgentBridge:
                 except Exception as _tme:
                     logger.warning(f"[ThingMemory] get_memory_block error: {_tme}")
 
+            # Keep this after all other per-turn blocks so the selected reply
+            # mode is the final sentence in the system prompt.
+            from agent.chat.reply_mode import append_reply_mode_instruction
+            append_system = append_reply_mode_instruction(
+                append_system,
+                context.get("reply_mode") if context else None,
+            )
+
             try:
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
