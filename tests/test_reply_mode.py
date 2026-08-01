@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from agent.chat.reply_mode import (
     CLASSIFIER_TIMEOUT,
     REPLY_MODE_MODEL,
+    VOICE_REPLY_CAPABILITY_INSTRUCTION,
     append_reply_mode_instruction,
     classify_reply_mode,
     normalize_parent_reply_mode,
@@ -70,8 +71,13 @@ def test_reply_mode_instruction_covers_all_four_states():
     )
 
     voice_prompt = append_reply_mode_instruction(base, "voice", "text")
+    keep_voice_prompt = append_reply_mode_instruction(base, None, "voice")
     keep_text_prompt = append_reply_mode_instruction(base, None, "text")
+    assert VOICE_REPLY_CAPABILITY_INSTRUCTION in voice_prompt
+    assert VOICE_REPLY_CAPABILITY_INSTRUCTION in keep_voice_prompt
+    assert VOICE_REPLY_CAPABILITY_INSTRUCTION not in keep_text_prompt
     assert voice_prompt.endswith("当前的回复模式已经切换为语音。")
+    assert keep_voice_prompt.endswith("当前的回复模式保持为语音。")
     assert keep_text_prompt.endswith("当前的回复模式保持为文字。")
     assert normalize_parent_reply_mode("VOICE") == "voice"
     assert normalize_parent_reply_mode(None) == "text"
@@ -91,6 +97,7 @@ def test_classifier_uses_one_qwen_flash_call_with_thinking_disabled(_conf):
     result = classify_reply_mode(
         "满仓，给我发语音吧",
         request_id="req-1",
+        parent_reply_mode="text",
         http_post=post,
     )
 
@@ -100,8 +107,35 @@ def test_classifier_uses_one_qwen_flash_call_with_thinking_disabled(_conf):
     assert call.args[0] == "https://example.test/v1/chat/completions"
     assert call.kwargs["json"]["model"] == REPLY_MODE_MODEL
     assert call.kwargs["json"]["enable_thinking"] is False
-    assert call.kwargs["json"]["messages"][-1]["content"] == "满仓，给我发语音吧"
+    classifier_input = json.loads(
+        call.kwargs["json"]["messages"][-1]["content"],
+    )
+    assert classifier_input == {
+        "parent_reply_mode": "text",
+        "message": "满仓，给我发语音吧",
+    }
+    classifier_prompt = call.kwargs["json"]["messages"][0]["content"]
+    assert "听到回复本身明显是体验的一部分" in classifier_prompt
+    assert "普通聊天、事实问答、天气" in classifier_prompt
     assert call.kwargs["timeout"] == CLASSIFIER_TIMEOUT
+
+
+@patch(
+    "agent.chat.reply_mode.conf",
+    return_value={
+        "open_ai_api_key": "test-key",
+        "open_ai_api_base": "https://example.test/v1",
+    },
+)
+def test_classifier_normalizes_missing_parent_mode_to_text(_conf):
+    post = Mock(return_value=_FakeResponse('{"reply_mode":null}'))
+
+    assert classify_reply_mode("今天天气怎么样", http_post=post) is None
+
+    classifier_input = json.loads(
+        post.call_args.kwargs["json"]["messages"][-1]["content"],
+    )
+    assert classifier_input["parent_reply_mode"] == "text"
 
 
 @patch(
@@ -225,6 +259,7 @@ def test_message_response_exposes_the_same_classification(
     classify_mock.assert_called_once_with(
         "满仓，发语音",
         request_id=response["request_id"],
+        parent_reply_mode="text",
     )
     assert context.get("reply_mode") == "voice"
     assert context.get("parent_reply_mode") == "text"
@@ -290,7 +325,10 @@ def test_cloud_chat_chunks_carry_the_single_classification(
         parent_reply_mode="voice",
     )
 
-    classify_mock.assert_called_once_with("别发语音，打字回复")
+    classify_mock.assert_called_once_with(
+        "别发语音，打字回复",
+        parent_reply_mode="voice",
+    )
     assert _FakeExecutor.system_prompts == [
         "system\n\n当前的回复模式已经切换为文字。"
     ]
@@ -359,6 +397,7 @@ def test_web_agent_appends_reply_mode_after_other_dynamic_blocks(
     assert agent.append_system == (
         "[其他动态状态]\n\n"
         "[记忆]\n用户喜欢散步\n\n"
+        f"{VOICE_REPLY_CAPABILITY_INSTRUCTION}\n\n"
         "当前的回复模式已经切换为语音。"
     )
 

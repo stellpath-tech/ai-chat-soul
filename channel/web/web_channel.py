@@ -678,7 +678,8 @@ class WebChannel(ChatChannel):
             self.request_to_session[request_id] = session_id
 
             # The classifier returns a per-turn mode switch directive:
-            # voice/text when explicitly requested, otherwise None.
+            # voice/text when a switch is requested or materially improves
+            # this turn, otherwise None.
             from agent.chat.reply_mode import (
                 classify_reply_mode,
                 normalize_parent_reply_mode,
@@ -686,7 +687,11 @@ class WebChannel(ChatChannel):
             parent_reply_mode = normalize_parent_reply_mode(
                 json_data.get("parent_reply_mode"),
             )
-            reply_mode = classify_reply_mode(prompt, request_id=request_id)
+            reply_mode = classify_reply_mode(
+                prompt,
+                request_id=request_id,
+                parent_reply_mode=parent_reply_mode,
+            )
 
             if session_id not in self.session_queues:
                 self.session_queues[session_id] = Queue()

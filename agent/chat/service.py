@@ -48,9 +48,14 @@ class ChatService:
         from agent.chat.reply_mode import (
             append_reply_mode_instruction,
             classify_reply_mode,
+            normalize_parent_reply_mode,
         )
 
-        reply_mode = classify_reply_mode(query)
+        parent_reply_mode = normalize_parent_reply_mode(parent_reply_mode)
+        reply_mode = classify_reply_mode(
+            query,
+            parent_reply_mode=parent_reply_mode,
+        )
 
         def send_chunk_with_reply_mode(chunk: dict):
             payload = dict(chunk)
