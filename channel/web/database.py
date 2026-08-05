@@ -481,7 +481,7 @@ def update_user_nickname(user_id, user_nickname):
         cursor.execute("SELECT nickname, used_nickname FROM user WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         if not row:
-            return False
+            return None
         used = []
         try:
             used = json.loads(row["used_nickname"] or "[]")
@@ -496,7 +496,7 @@ def update_user_nickname(user_id, user_nickname):
             WHERE id = ?
         """, (user_nickname, json.dumps(used, ensure_ascii=False), now_str, user_id))
         conn.commit()
-        return True
+        return old_nickname
 
 def request_account_deletion(user_id):
     now = _now_app_timezone()

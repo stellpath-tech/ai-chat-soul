@@ -142,7 +142,53 @@ def is_duplicate(workspace_root: str, user_id: str, event: str) -> bool:
     for row in _get_cached(workspace_root, user_id):
         if _normalize(row["event"]) == normalized:
             return True
+    # 已打标的昵称偏好事件也应参与去重，防止同一事件被重新抽取入库
+    path = db_path(workspace_root)
+    if os.path.exists(path):
+        with _conn(path) as conn:
+            rows = conn.execute(
+                "SELECT event FROM thing_memory WHERE user_id=? AND status='superseded'",
+                (user_id,),
+            ).fetchall()
+        for row in rows:
+            if _normalize(row["event"]) == normalized:
+                return True
     return False
+
+
+_NICK_INTENT = ("被叫", "希望叫", "想叫", "称呼", "昵称", "叫我", "改叫", "不要叫")
+
+
+def _is_nickname_pref_event(event: str, former_names: list) -> bool:
+    """双条件判断：事件含昵称意图词 且 含某个曾用名，才视为过期昵称偏好事件。
+
+    避免误伤主题词记忆（如"用户提到仿真青蛙树脂摆件"含"青蛙"但无昵称意图词）。
+    """
+    if not any(k in event for k in _NICK_INTENT):
+        return False
+    return any(n in event for n in former_names)
+
+
+def tag_former_nickname_memories(workspace_root: str, user_id: str, former_names: list) -> int:
+    """把引用曾用名的昵称偏好记忆标记为 superseded，返回打标条数。"""
+    if not former_names:
+        return 0
+    path = db_path(workspace_root)
+    with _conn(path) as conn:
+        rows = conn.execute(
+            "SELECT id, event FROM thing_memory WHERE user_id=? AND status='active'",
+            (user_id,),
+        ).fetchall()
+        matched = [r["id"] for r in rows if _is_nickname_pref_event(r["event"], former_names)]
+        if matched:
+            conn.executemany(
+                "UPDATE thing_memory SET status='superseded' WHERE id=? AND status='active'",
+                [(m,) for m in matched],
+            )
+            conn.commit()
+    # 失效内存缓存，否则进程内仍会注入旧记忆
+    _invalidate(workspace_root, user_id)
+    return len(matched)
 
 
 def _normalize(text: str) -> str:

@@ -118,6 +118,13 @@ def _extract_worker(
                             # 旧昵称非空且与新昵称不同时才归档
                             if old_nick and old_nick != nickname and old_nick not in used:
                                 used.append(old_nick)
+                            # 昵称变更时，给引用旧昵称的记忆打标签（superseded）
+                            if old_nick and old_nick != nickname:
+                                try:
+                                    from agent.memory.thing_memory.store import tag_former_nickname_memories
+                                    tag_former_nickname_memories(workspace_root, user_id, [old_nick])
+                                except Exception as _tag_e:
+                                    logger.warning(f"[ThingMemory] tag former-nickname memories failed: {_tag_e}")
                             conn.execute(
                                 "UPDATE user SET nickname=?, used_nickname=?, updated_at=datetime('now') WHERE id=?",
                                 (nickname, _json.dumps(used, ensure_ascii=False), uid_int),

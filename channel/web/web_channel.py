@@ -1484,7 +1484,8 @@ class UserNicknameHandler:
             if err:
                 return _api_response(False, err, None)
 
-            if not db.update_user_nickname(user["id"], user_nickname):
+            old_nick = db.update_user_nickname(user["id"], user_nickname)
+            if old_nick is None:
                 return _api_response(False, "用户不存在", None)
 
             try:
@@ -1494,6 +1495,16 @@ class UserNicknameHandler:
                 update_nickname(workspace_root, f"user_{user['id']}", user_nickname)
             except Exception as cache_error:
                 logger.warning(f"[UserNicknameHandler] cache update failed: {cache_error}")
+
+            # 昵称变更时，给引用旧昵称的记忆打标签（superseded）
+            if old_nick != user_nickname:
+                try:
+                    from agent.memory.thing_memory.store import tag_former_nickname_memories
+                    tagged = tag_former_nickname_memories(workspace_root, f"user_{user['id']}", [old_nick])
+                    if tagged:
+                        logger.info(f"[UserNicknameHandler] tagged {tagged} former-nickname memories for user_{user['id']}")
+                except Exception as tag_error:
+                    logger.warning(f"[UserNicknameHandler] tag former-nickname memories failed: {tag_error}")
 
             return _api_response(True, "Success", None)
         except json.JSONDecodeError:

@@ -736,6 +736,23 @@ class AgentBridge:
                 except Exception:
                     pass
 
+            # 每轮从 user 表读取曾用名（used_nickname）注入 runtime_info（session_id = user_{id}）
+            _user_former = []
+            if session_id and session_id.startswith("user_"):
+                try:
+                    import json as _json
+                    from agent.memory.thing_memory.store import _conn, db_path as _dbpath
+                    _uid = int(session_id[5:])
+                    with _conn(_dbpath(self.workspace_root)) as _dbconn:
+                        _row = _dbconn.execute(
+                            "SELECT used_nickname FROM user WHERE id=?", (_uid,)
+                        ).fetchone()
+                    if _row:
+                        _user_former = _json.loads(_row["used_nickname"] or "[]")
+                except Exception:
+                    pass
+            agent.runtime_info["user_former_names"] = _user_former
+
             # 前端在 GET /api/weather 时已拿到 sensor_label，直接注入（由 enable_sensor_label 开关控制）
             from config import conf as _conf
             if _conf().get("enable_sensor_label", False):
