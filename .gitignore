@@ -1,4 +1,6 @@
 .DS_Store
+._*
+*.bak.*
 .idea
 .vscode
 .venv

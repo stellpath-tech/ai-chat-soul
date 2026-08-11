@@ -1,6 +1,7 @@
 import io
 import os
 import re
+from typing import Optional
 from urllib.parse import urlparse
 from common.log import logger
 
@@ -115,3 +116,25 @@ def expand_path(path: str) -> str:
                 expanded = os.path.join(home, path[2:])
     
     return expanded
+
+
+def validate_nickname(name) -> Optional[str]:
+    """Validate a user nickname. Returns an error message string, or None if valid.
+
+    Rules: non-empty; CJK/ASCII only; weighted length (CJK=2, ASCII=1) <= 14
+    (i.e. at most 7 CJK chars or 14 ASCII letters).
+    """
+    if not isinstance(name, str) or not name.strip():
+        return "昵称不可为空"
+    value = name.strip()
+    weighted_len = 0
+    for ch in value:
+        if "\u4e00" <= ch <= "\u9fff":
+            weighted_len += 2
+        elif ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
+            weighted_len += 1
+        else:
+            return "昵称仅支持中文或英文字母"
+    if weighted_len > 14:
+        return "昵称最多 7 个汉字或 14 个英文字母"
+    return None

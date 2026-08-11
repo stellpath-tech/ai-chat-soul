@@ -14,7 +14,7 @@ from typing import Optional
 
 from .store import (
     get_recent_memories, add_memory, is_duplicate,
-    archive_messages,
+    archive_messages, is_nickname_intent_event,
 )
 from .extractor import extract_memories
 
@@ -82,14 +82,43 @@ def _extract_worker(
         existing = get_recent_memories(workspace_root, user_id, session_id, limit=40)
         existing_events = [m["event"] for m in existing]
 
-        extracted, nickname = extract_memories(
-            msgs_to_extract, api_key, api_base, model, existing_events=existing_events
-        )
-        logger.info(f"[ThingMemory] user={user_id} extracted={len(extracted)} nickname={nickname!r}")
+        # 当前昵称：昵称只从【最新消息】里抽取，且必须与当前昵称不同（防陈旧窗口覆盖）
+        current_nick = None
+        try:
+            from agent.memory.user_cache import get as _cache_get
+            _cached = _cache_get(workspace_root, user_id)
+            current_nick = _cached.get("nickname") if _cached else None
+        except Exception:
+            pass
 
-        # 写入新记忆
+        # 助手当前昵称（bear_nickname）：从 soul.db.user 表读取
+        current_bear = None
+        try:
+            if user_id.startswith("user_"):
+                import json as _json
+                from agent.memory.thing_memory.store import _conn, db_path
+                _uid = int(user_id[5:])
+                _db = db_path(workspace_root)
+                with _conn(_db) as conn:
+                    _brow = conn.execute("SELECT bear_nickname FROM user WHERE id=?", (_uid,)).fetchone()
+                    if _brow and _brow["bear_nickname"]:
+                        current_bear = _brow["bear_nickname"]
+        except Exception:
+            pass
+
+        extracted, nickname, bearnickname = extract_memories(
+            msgs_to_extract, api_key, api_base, model,
+            existing_events=existing_events, current_nickname=current_nick,
+            current_bearnickname=current_bear,
+        )
+        logger.info(f"[ThingMemory] user={user_id} extracted={len(extracted)} nickname={nickname!r} bearnickname={bearnickname!r}")
+
+        # 写入新记忆（昵称设置类描述不入事件记忆，昵称走独立通道）
         saved = 0
         for mem in extracted[:5]:
+            if is_nickname_intent_event(mem["event"]):
+                logger.info(f"[ThingMemory] skip nickname-like event: {mem['event']}")
+                continue
             if not is_duplicate(workspace_root, user_id, mem["event"]):
                 src = " | ".join(msgs_to_extract)[:200]
                 add_memory(workspace_root, user_id, session_id, mem, source_text=src)
@@ -118,11 +147,15 @@ def _extract_worker(
                             # 旧昵称非空且与新昵称不同时才归档
                             if old_nick and old_nick != nickname and old_nick not in used:
                                 used.append(old_nick)
-                            # 昵称变更时，给引用旧昵称的记忆打标签（superseded）
+                            # 昵称变更时，把引用旧昵称的记忆改写为曾用昵称格式（保持 active，自消歧）
                             if old_nick and old_nick != nickname:
                                 try:
                                     from agent.memory.thing_memory.store import tag_former_nickname_memories
-                                    tag_former_nickname_memories(workspace_root, user_id, [old_nick])
+                                    rewritten = tag_former_nickname_memories(
+                                        workspace_root, user_id, [old_nick], new_nickname=nickname
+                                    )
+                                    if rewritten:
+                                        logger.info(f"[ThingMemory] rewrote {rewritten} former-nickname memories: {old_nick!r}→{nickname!r}")
                                 except Exception as _tag_e:
                                     logger.warning(f"[ThingMemory] tag former-nickname memories failed: {_tag_e}")
                             conn.execute(
@@ -134,5 +167,33 @@ def _extract_worker(
                 logger.info(f"[ThingMemory] nickname updated: user={user_id} nickname={nickname!r}")
             except Exception as _ne:
                 logger.warning(f"[ThingMemory] nickname update failed: {_ne}")
+
+        # 写入助手昵称（bear_nickname，旧名归档到 used_bear_nickname）
+        if bearnickname:
+            try:
+                import json as _json
+                from agent.memory.thing_memory.store import _conn, db_path
+
+                old_bear = None
+                if user_id.startswith("user_"):
+                    uid_int = int(user_id[5:])
+                    db = db_path(workspace_root)
+                    with _conn(db) as conn:
+                        brow = conn.execute(
+                            "SELECT bear_nickname, used_bear_nickname FROM user WHERE id=?", (uid_int,)
+                        ).fetchone()
+                        if brow:
+                            old_bear = brow["bear_nickname"]
+                            used_bear = _json.loads(brow["used_bear_nickname"] or "[]")
+                            if old_bear and old_bear != bearnickname and old_bear not in used_bear:
+                                used_bear.append(old_bear)
+                            conn.execute(
+                                "UPDATE user SET bear_nickname=?, used_bear_nickname=?, updated_at=datetime('now') WHERE id=?",
+                                (bearnickname, _json.dumps(used_bear, ensure_ascii=False), uid_int),
+                            )
+                            conn.commit()
+                logger.info(f"[ThingMemory] bearnickname updated: user={user_id} {old_bear!r}→{bearnickname!r}")
+            except Exception as _be:
+                logger.warning(f"[ThingMemory] bearnickname update failed: {_be}")
     except Exception as e:
         logger.warning(f"[ThingMemory] extraction worker error: {e}", exc_info=True)

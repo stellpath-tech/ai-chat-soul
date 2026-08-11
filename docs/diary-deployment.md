@@ -133,6 +133,25 @@ curl -X POST http://127.0.0.1:9899/api/push/test \
 `tencent_im_push_max_retries` 独立重试；通知点击参数通过 `Ext` 透传
 `type=diary`、`diaryDate` 和 `ts`。
 
+## 日记图片风格
+
+客户端使用 `x-auth-token` 调用：
+
+```http
+PUT /api/diary/image/style
+Content-Type: application/json
+
+{"style":"pixel_art"}
+```
+
+支持 `warm_healing`（温暖治愈，默认）、`wool_felt`（绒毡童话）、
+`pixel_art`（像素漫游）、`clay_art`（软陶物语）、`lego_style`（积木奇境）和
+`chinese_ink`（水墨写意）。成功响应为 `{"success": true}`。
+
+保存后的风格只在创建新日记任务时写入 `user_diary.diary_image_style` 快照并用于
+该任务生图；已有日记图片和文字不会修改。Prompt 文件位于
+`channel/web/diary/prompt_styles/`，每个文件保留测试平台来源版本。
+
 ## 发布检查
 
 1. 备份 `~/cow/data/soul.db`。

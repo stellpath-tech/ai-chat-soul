@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import threading
@@ -10,7 +11,9 @@ from unittest.mock import patch
 import channel.web.database as db
 from channel.web.diary import service
 from channel.web.diary import storage
+from channel.web.diary import styles
 from channel.web.diary import worker
+from channel.web import web_channel
 
 
 class DiaryDatabaseTest(unittest.TestCase):
@@ -61,6 +64,37 @@ class DiaryDatabaseTest(unittest.TestCase):
         job = db.create_or_reset_diary_job(self.user_id, "2026-07-08")
         self.assertEqual("GENERATING", db.fail_diary_job(job["id"], "first", max_retries=2))
         self.assertEqual("SKIPPED", db.fail_diary_job(job["id"], "second", max_retries=2))
+
+    def test_image_style_defaults_updates_and_is_snapshotted_per_diary(self):
+        self.assertEqual("warm_healing", db.get_user_diary_image_style(self.user_id))
+        self.assertTrue(db.update_user_diary_image_style(self.user_id, "pixel_art"))
+        first = db.create_or_reset_diary_job(self.user_id, "2026-07-08")
+        self.assertTrue(db.update_user_diary_image_style(self.user_id, "lego_style"))
+        second = db.create_or_reset_diary_job(self.user_id, "2026-07-07")
+        with closing(db.get_db()) as conn:
+            first_style = conn.execute(
+                "SELECT diary_image_style FROM user_diary WHERE id = ?", (first["id"],),
+            ).fetchone()["diary_image_style"]
+            second_style = conn.execute(
+                "SELECT diary_image_style FROM user_diary WHERE id = ?", (second["id"],),
+            ).fetchone()["diary_image_style"]
+        self.assertEqual("pixel_art", first_style)
+        self.assertEqual("lego_style", second_style)
+
+    def test_image_style_put_endpoint_validates_and_saves(self):
+        web_channel.web.ctx.env = {"HTTP_X_AUTH_TOKEN": "token"}
+        handler = web_channel.DiaryImageStyleHandler()
+        with patch.object(web_channel.web, "header"), patch.object(
+            web_channel.web, "data", return_value=b'{"style":"chinese_ink"}',
+        ):
+            self.assertEqual({"success": True}, json.loads(handler.PUT()))
+        self.assertEqual("chinese_ink", db.get_user_diary_image_style(self.user_id))
+
+        with patch.object(web_channel.web, "header"), patch.object(
+            web_channel.web, "data", return_value=b'{"style":"unknown"}',
+        ):
+            self.assertEqual({"success": False}, json.loads(handler.PUT()))
+        self.assertEqual("chinese_ink", db.get_user_diary_image_style(self.user_id))
 
     def test_full_text_generation_writes_diary_and_card(self):
         db.create_or_reset_diary_job(self.user_id, "2026-07-09")
@@ -117,6 +151,29 @@ class DiaryServiceTest(unittest.TestCase):
         self.assertEqual(1, len(prompts))
         self.assertIn("共 2 条", prompts[0]["positive_prompt"])
         self.assertIn("1：一起散步", prompts[0]["positive_prompt"])
+
+    def test_each_product_style_loads_its_test_platform_prompt(self):
+        expected_sources = {
+            "warm_healing": "测试2v29",
+            "wool_felt": "羊毛毡v3",
+            "pixel_art": "像素风v7",
+            "clay_art": "超轻粘土v2",
+            "lego_style": "乐高风v2",
+            "chinese_ink": "清新水墨v1",
+        }
+        self.assertEqual(set(expected_sources), set(styles.DIARY_IMAGE_STYLES))
+        for style, source in expected_sources.items():
+            bundle = styles.get_diary_image_prompt(style)
+            prompts = service._build_image_prompts(["一起散步"], style)
+            self.assertEqual(source, bundle["source"])
+            self.assertEqual(style, prompts[0]["style"])
+            self.assertTrue(prompts[0]["positive_prompt"].startswith(bundle["positive_prompt"]))
+            self.assertEqual(bundle["negative_prompt"], prompts[0]["negative_prompt"])
+
+    def test_unknown_style_falls_back_to_warm_healing(self):
+        self.assertEqual(
+            "warm_healing", styles.get_diary_image_prompt("not-a-style")["style"],
+        )
 
     def test_local_image_storage_returns_public_url(self):
         fake_config = {

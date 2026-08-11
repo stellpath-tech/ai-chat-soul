@@ -125,14 +125,7 @@ class Agent:
                 user_nickname = self.runtime_info.get("user_nickname", "") if self.runtime_info else ""
                 if user_nickname:
                     state_lines.append(f"用户昵称：{user_nickname}")
-                _former = self.runtime_info.get("user_former_names") or []
-                if _former:
-                    state_lines.append(f"用户曾用名：{'、'.join(_former)}")
-                    if user_nickname:
-                        state_lines.append(
-                            f"请始终以当前昵称“{user_nickname}”称呼用户，不要使用曾用名称呼，"
-                            "历史对话中出现的旧称呼均为曾用名。"
-                        )
+                # 曾用名不再注入状态行：曾用昵称记忆（自消歧格式）已在记忆块中承载历史
                 time_block = "\n".join(state_lines)
                 prompt = (prompt + "\n\n" + time_block) if prompt else time_block
             except Exception as e:

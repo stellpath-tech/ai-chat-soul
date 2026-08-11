@@ -30,6 +30,7 @@ from channel.web.push.service import (
     send_authenticated_user_push_test,
     unregister_authenticated_user_push_device,
 )
+from channel.web.diary.styles import is_valid_diary_image_style
 
 try:
     from common import event_log
@@ -87,22 +88,6 @@ def _require_admin():
     return _api_response(False, "unauthorized", None)
 
 
-def _nickname_error(value):
-    if not isinstance(value, str) or not value.strip():
-        return "昵称不可为空"
-    name = value.strip()
-    weighted_len = 0
-    for ch in name:
-        if "\u4e00" <= ch <= "\u9fff":
-            weighted_len += 2
-        elif ("a" <= ch <= "z") or ("A" <= ch <= "Z"):
-            weighted_len += 1
-        else:
-            return "昵称仅支持中文或英文字母"
-    if weighted_len > 14:
-        return "昵称最多 7 个汉字或 14 个英文字母"
-    return None
-
 
 class WebMessage(ChatMessage):
     def __init__(
@@ -138,6 +123,7 @@ class WebChannel(ChatChannel):
         self.session_queues = {}       # session_id -> Queue (fallback polling)
         self.request_to_session = {}   # request_id -> session_id
         self.sse_queues = {}           # request_id -> Queue (SSE streaming)
+        self._sse_created_at = {}       # request_id -> float creation ts (cleanup)
         self._http_server = None
         # 设备注册中心：device_id -> {lastSeen: float}
         self.device_registry = {}
@@ -178,6 +164,7 @@ class WebChannel(ChatChannel):
                 return
 
             reply_mode = context.get("reply_mode")
+            _nc_value = (context.get("name_changed_holder") or {}).get("value")
             _start_time = context.get("llm_start_time")
             _latency_ms = int((time.time() - _start_time) * 1000) if _start_time else None
             event_log.log(
@@ -206,7 +193,7 @@ class WebChannel(ChatChannel):
             if source == "DEVICE" and device_id and reply.content:
                 self._push_chatlog(device_id, "assistant", reply.content)
             message_id = None
-            if context.get("user_id", -1) != -1 and reply.content:
+            if context.get("user_id", -1) != -1 and reply.content and not context.get("change_settings"):
                 message_id = db.append_chat_message(
                     context.get("user_id"),
                     context.get("session_id", ""),
@@ -227,6 +214,7 @@ class WebChannel(ChatChannel):
                     "timestamp": time.time(),
                     "message_id": message_id,
                     "reply_mode": reply_mode,
+                    "nameChangedSuccess": _nc_value,
                 })
                 logger.debug(f"SSE done sent for request {request_id}")
                 return
@@ -239,6 +227,7 @@ class WebChannel(ChatChannel):
                     "timestamp": time.time(),
                     "request_id": request_id,
                     "reply_mode": reply_mode,
+                    "nameChangedSuccess": _nc_value,
                 }
                 self.session_queues[session_id].put(response_data)
                 logger.debug(f"Response sent to poll queue for session {session_id}, request {request_id}")
@@ -285,6 +274,7 @@ class WebChannel(ChatChannel):
         request_id: str,
         log_ctx: dict = None,
         reply_mode=None,
+        name_changed_holder: dict = None,
     ):
         """Build an on_event callback that pushes agent stream events into the SSE queue."""
         log_ctx = log_ctx or {}
@@ -295,6 +285,7 @@ class WebChannel(ChatChannel):
             q = self.sse_queues[request_id]
             event_type = event.get("type")
             data = event.get("data", {})
+            _nc = (name_changed_holder or {}).get("value")
 
             if event_type == "message_update":
                 delta = data.get("delta", "")
@@ -303,6 +294,7 @@ class WebChannel(ChatChannel):
                         "type": "delta",
                         "content": delta,
                         "reply_mode": reply_mode,
+                        "nameChangedSuccess": _nc,
                     })
 
             elif event_type == "tool_execution_start":
@@ -313,6 +305,7 @@ class WebChannel(ChatChannel):
                     "tool": tool_name,
                     "arguments": arguments,
                     "reply_mode": reply_mode,
+                    "nameChangedSuccess": _nc,
                 })
 
             elif event_type == "tool_execution_end":
@@ -334,6 +327,7 @@ class WebChannel(ChatChannel):
                     "result": sse_result,
                     "execution_time": round(exec_time, 2),
                     "reply_mode": reply_mode,
+                    "nameChangedSuccess": _nc,
                 })
                 event_log.log(
                     "tool_call",
@@ -347,6 +341,22 @@ class WebChannel(ChatChannel):
                 )
 
         return on_event
+
+    def _ensure_sse_queue(self, request_id: str):
+        """Create (or reuse) the SSE queue for request_id; sweep stale unconnected queues."""
+        now = time.time()
+        stale = [
+            rid for rid, created in list(getattr(self, "_sse_created_at", {}).items())
+            if now - created > 300 and rid in self.sse_queues
+        ]
+        for rid in stale:
+            self.sse_queues.pop(rid, None)
+            self._sse_created_at.pop(rid, None)
+            logger.debug(f"[WebChannel] cleaned stale SSE queue {rid}")
+        if request_id not in self.sse_queues:
+            self.sse_queues[request_id] = Queue()
+            self._sse_created_at[request_id] = now
+        return self.sse_queues[request_id]
 
     def _save_image_from_b64(self, b64_data: str, image_type: str = "jpeg") -> str:
         """将 base64 图片解码并保存为临时文件，返回文件路径；失败返回空字符串"""
@@ -670,6 +680,7 @@ class WebChannel(ChatChannel):
                     image_url_input = _url_match.group(0)
                     prompt = (prompt[:_url_match.start()] + " " + prompt[_url_match.end():]).strip()
             use_sse = json_data.get('stream', True)
+            change_settings = bool(json_data.get('change_settings'))
             timezone     = json_data.get('timezone')
             sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传
             db.record_user_timezone_async(user_id, timezone)
@@ -697,7 +708,7 @@ class WebChannel(ChatChannel):
                 self.session_queues[session_id] = Queue()
 
             if use_sse:
-                self.sse_queues[request_id] = Queue()
+                self._ensure_sse_queue(request_id)
 
             msg = WebMessage(self._generate_msg_id(), prompt or image_b64 or image_url_input)
             msg.from_user_id = session_id
@@ -748,11 +759,13 @@ class WebChannel(ChatChannel):
                     **_log_ctx,
                 )
 
+                context["name_changed_holder"] = {"value": None}
                 if use_sse:
                     context["on_event"] = self._make_sse_callback(
                         request_id,
                         _log_ctx,
                         reply_mode,
+                        context["name_changed_holder"],
                     )
 
                 if source == "DEVICE" and device_id:
@@ -843,11 +856,13 @@ class WebChannel(ChatChannel):
                     **_log_ctx,
                 )
 
+                context["name_changed_holder"] = {"value": None}
                 if use_sse:
                     context["on_event"] = self._make_sse_callback(
                         request_id,
                         _log_ctx,
                         reply_mode,
+                        context["name_changed_holder"],
                     )
 
 
@@ -904,6 +919,8 @@ class WebChannel(ChatChannel):
             context["phone_number"] = phone_number
             context["reply_mode"] = reply_mode
             context["parent_reply_mode"] = parent_reply_mode
+            if change_settings:
+                context["change_settings"] = True
 
             _log_ctx = {
                 "user_id": user_id,
@@ -923,17 +940,19 @@ class WebChannel(ChatChannel):
                 **_log_ctx,
             )
 
+            context["name_changed_holder"] = {"value": None}
             if use_sse:
                 context["on_event"] = self._make_sse_callback(
                     request_id,
                     _log_ctx,
                     reply_mode,
+                    context["name_changed_holder"],
                 )
 
             # DEVICE 来源：将用户消息写入聊天记录队列
             if source == "DEVICE" and device_id:
                 self._push_chatlog(device_id, "user", prompt)
-            if user_id != -1:
+            if user_id != -1 and not change_settings:
                 message_id = db.append_chat_message(
                     user_id, session_id, "user", prompt, "text", source, request_id,
                     weather_text=sensor_label,
@@ -1059,6 +1078,7 @@ class WebChannel(ChatChannel):
                     "request_id": response["request_id"],
                     "timestamp": response["timestamp"],
                     "reply_mode": response.get("reply_mode"),
+                    "nameChangedSuccess": response.get("nameChangedSuccess"),
                 })
                 
             except Empty:
@@ -1126,7 +1146,6 @@ class WebChannel(ChatChannel):
             '/api/pet/event/send', 'PetEventSendHandler',
             '/api/auth/register', 'AuthRegisterHandler',
             '/api/user/profile', 'UserProfileHandler',
-            '/api/user/nickname', 'UserNicknameHandler',
             '/api/user/account', 'UserAccountHandler',
             '/api/feedback', 'FeedbackHandler',
             '/api/admin/complaints/auth', 'ComplaintAdminAuthHandler',
@@ -1139,6 +1158,7 @@ class WebChannel(ChatChannel):
             '/api/push/test', 'PushTestHandler',
             '/api/chat/history', 'ChatHistoryHandler',
             '/api/diary', 'DiaryHandler',
+            '/api/diary/image/style', 'DiaryImageStyleHandler',
             '/api/invite_code', 'InviteCodeHandler',
             '/api/user_behavior', 'UserBehaviorHandler',
             '/api/client/event', 'ClientEventHandler',
@@ -1465,53 +1485,6 @@ class UserProfileHandler:
         except Exception as e:
             logger.exception(f"UserProfileHandler error: {e}")
             event_log.log_exception("user_profile_failed", e, endpoint="/api/user/profile")
-            return _api_response(False, "Server error", None)
-
-
-class UserNicknameHandler:
-    def PUT(self):
-        web.header('Content-Type', 'application/json; charset=utf-8')
-        web.header('Access-Control-Allow-Origin', '*')
-        try:
-            user = _auth_user()
-            if not user:
-                web.ctx.status = '401 Unauthorized'
-                return _api_response(False, "unauthorized", None)
-
-            data = json.loads(web.data() or b"{}")
-            user_nickname = (data.get("userNickname") or "").strip()
-            err = _nickname_error(user_nickname)
-            if err:
-                return _api_response(False, err, None)
-
-            old_nick = db.update_user_nickname(user["id"], user_nickname)
-            if old_nick is None:
-                return _api_response(False, "用户不存在", None)
-
-            try:
-                from agent.memory.user_cache import update_nickname
-                from common.utils import expand_path
-                workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
-                update_nickname(workspace_root, f"user_{user['id']}", user_nickname)
-            except Exception as cache_error:
-                logger.warning(f"[UserNicknameHandler] cache update failed: {cache_error}")
-
-            # 昵称变更时，给引用旧昵称的记忆打标签（superseded）
-            if old_nick != user_nickname:
-                try:
-                    from agent.memory.thing_memory.store import tag_former_nickname_memories
-                    tagged = tag_former_nickname_memories(workspace_root, f"user_{user['id']}", [old_nick])
-                    if tagged:
-                        logger.info(f"[UserNicknameHandler] tagged {tagged} former-nickname memories for user_{user['id']}")
-                except Exception as tag_error:
-                    logger.warning(f"[UserNicknameHandler] tag former-nickname memories failed: {tag_error}")
-
-            return _api_response(True, "Success", None)
-        except json.JSONDecodeError:
-            return _api_response(False, "invalid JSON body", None)
-        except Exception as e:
-            logger.exception(f"UserNicknameHandler error: {e}")
-            event_log.log_exception("user_nickname_failed", e, endpoint="/api/user/nickname")
             return _api_response(False, "Server error", None)
 
 
@@ -1857,6 +1830,40 @@ class DiaryHandler:
             logger.exception("DiaryHandler POST error: %s", e)
             event_log.log_exception("diary_generate_failed", e, endpoint="/api/diary")
             return _api_response(False, "Server error", None)
+
+
+class DiaryImageStyleHandler:
+    def PUT(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return json.dumps({"success": False})
+            body = json.loads(web.data() or b"{}")
+            if not isinstance(body, dict):
+                web.ctx.status = '400 Bad Request'
+                return json.dumps({"success": False})
+            style = body.get("style")
+            if not is_valid_diary_image_style(style):
+                web.ctx.status = '400 Bad Request'
+                return json.dumps({"success": False})
+            if not db.update_user_diary_image_style(user["id"], style):
+                web.ctx.status = '500 Internal Server Error'
+                return json.dumps({"success": False})
+            return json.dumps({"success": True})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            web.ctx.status = '400 Bad Request'
+            return json.dumps({"success": False})
+        except Exception as error:
+            logger.exception("DiaryImageStyleHandler PUT error: %s", error)
+            event_log.log_exception(
+                "diary_image_style_update_failed", error,
+                endpoint="/api/diary/image/style",
+            )
+            web.ctx.status = '500 Internal Server Error'
+            return json.dumps({"success": False})
 
 
 class InviteCodeHandler:

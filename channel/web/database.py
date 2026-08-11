@@ -20,6 +20,7 @@ DEFAULT_BEAR_NICKNAME = "满仓"
 MAX_CHAT_MESSAGES_PER_USER = 1000
 APP_TIMEZONE = timezone(timedelta(hours=8))
 DIARY_STATES = {"GENERATING", "DONE", "SKIPPED"}
+DEFAULT_DIARY_IMAGE_STYLE = "warm_healing"
 _USER_TIMEZONE_CACHE = {}
 _USER_TIMEZONE_CACHE_LOCK = threading.Lock()
 
@@ -56,6 +57,7 @@ def init_db():
           deletion_requested_at DATETIME DEFAULT NULL,
           deletion_deadline DATETIME DEFAULT NULL,
           deleted_at DATETIME DEFAULT NULL,
+          diary_image_style VARCHAR(32) NOT NULL DEFAULT 'warm_healing',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
@@ -70,6 +72,7 @@ def init_db():
             "deletion_requested_at": "DATETIME DEFAULT NULL",
             "deletion_deadline": "DATETIME DEFAULT NULL",
             "deleted_at": "DATETIME DEFAULT NULL",
+            "diary_image_style": "VARCHAR(32) NOT NULL DEFAULT 'warm_healing'",
         })
 
         cursor.execute('''
@@ -196,6 +199,7 @@ def init_db():
           push_task_id VARCHAR(255) NOT NULL DEFAULT '',
           push_error TEXT NOT NULL DEFAULT '',
           push_sent_at DATETIME DEFAULT NULL,
+          diary_image_style VARCHAR(32) NOT NULL DEFAULT 'warm_healing',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(user_id, diary_date)
@@ -222,6 +226,7 @@ def init_db():
             "push_task_id": "VARCHAR(255) NOT NULL DEFAULT ''",
             "push_error": "TEXT NOT NULL DEFAULT ''",
             "push_sent_at": "DATETIME DEFAULT NULL",
+            "diary_image_style": "VARCHAR(32) NOT NULL DEFAULT 'warm_healing'",
         })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_diary_user_state_date ON user_diary(user_id, state, diary_date)")
         cursor.execute(
@@ -334,6 +339,27 @@ def get_active_user_by_token(token):
     if not user or user.get("account_status") != "active":
         return None
     return user
+
+def get_user_diary_image_style(user_id):
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            "SELECT diary_image_style FROM user WHERE id = ? AND account_status = 'active'",
+            (user_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return str(row["diary_image_style"] or DEFAULT_DIARY_IMAGE_STYLE)
+
+def update_user_diary_image_style(user_id, style):
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        cursor = conn.execute("""
+            UPDATE user
+            SET diary_image_style = ?, updated_at = ?
+            WHERE id = ? AND account_status = 'active'
+        """, (style, now_str, user_id))
+        conn.commit()
+        return cursor.rowcount == 1
 
 def register_user_push_device(
     user_id,
@@ -462,7 +488,7 @@ def _write_user_timezone(user_id, profile):
 def get_user_profile(user_id):
     with closing(get_db()) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT nickname FROM user WHERE id = ?", (user_id,))
+        cursor.execute("SELECT nickname, bear_nickname FROM user WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         if not row:
             return {
@@ -471,7 +497,7 @@ def get_user_profile(user_id):
             }
         return {
             "userNickname": row["nickname"] or DEFAULT_USER_NICKNAME,
-            "bearNickname": DEFAULT_BEAR_NICKNAME,
+            "bearNickname": row["bear_nickname"] or DEFAULT_BEAR_NICKNAME,
         }
 
 def update_user_nickname(user_id, user_nickname):
@@ -497,6 +523,42 @@ def update_user_nickname(user_id, user_nickname):
         """, (user_nickname, json.dumps(used, ensure_ascii=False), now_str, user_id))
         conn.commit()
         return old_nickname
+
+def get_bear_nickname(user_id):
+    """Return the user's current bear (AI) nickname, or None."""
+    with closing(get_db()) as conn:
+        row = conn.execute("SELECT bear_nickname FROM user WHERE id = ?", (user_id,)).fetchone()
+    if not row:
+        return None
+    return row["bear_nickname"] or None
+
+
+def update_user_bear_nickname(user_id, bear_nickname):
+    """Update user's bear (AI) nickname, archiving the old one to used_bear_nickname.
+    Returns the old nickname (or None if user missing)."""
+    now_str = _now_app_timezone_str()
+    with closing(get_db()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT bear_nickname, used_bear_nickname FROM user WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        used = []
+        try:
+            used = json.loads(row["used_bear_nickname"] or "[]")
+        except Exception:
+            used = []
+        old_bear = row["bear_nickname"]
+        if old_bear and old_bear != bear_nickname and old_bear not in used:
+            used.append(old_bear)
+        cursor.execute("""
+            UPDATE user
+            SET bear_nickname = ?, used_bear_nickname = ?, updated_at = ?
+            WHERE id = ?
+        """, (bear_nickname, json.dumps(used, ensure_ascii=False), now_str, user_id))
+        conn.commit()
+        return old_bear
+
 
 def request_account_deletion(user_id):
     now = _now_app_timezone()
@@ -894,7 +956,8 @@ def get_user_diary_detail(user_id, ts_ms):
     diary_date = _diary_date_from_ts_ms(user_id, ts_ms)
     with closing(get_db()) as conn:
         row = conn.execute("""
-            SELECT state, title, content, image_urls, generated_at, created_at
+            SELECT state, title, content, image_urls, diary_image_style,
+                   generated_at, created_at
             FROM user_diary
             WHERE user_id = ? AND diary_date = ?
         """, (user_id, diary_date)).fetchone()
@@ -916,6 +979,7 @@ def get_user_diary_detail(user_id, ts_ms):
         "imageUrls": image_urls,
         "title": row["title"] or "",
         "content": row["content"] or "",
+        "diaryImageStyle": row["diary_image_style"] or DEFAULT_DIARY_IMAGE_STYLE,
     }
 
 def list_active_users_for_diary():
@@ -932,6 +996,13 @@ def create_or_reset_diary_job(user_id, diary_date, mode="auto", force=False):
     now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
         cursor = conn.cursor()
+        user = cursor.execute(
+            "SELECT diary_image_style FROM user WHERE id = ? AND account_status = 'active'",
+            (user_id,),
+        ).fetchone()
+        if not user:
+            raise ValueError("active user not found")
+        diary_image_style = str(user["diary_image_style"] or DEFAULT_DIARY_IMAGE_STYLE)
         existing = cursor.execute("""
             SELECT id, state, generation_started_at FROM user_diary
             WHERE user_id = ? AND diary_date = ?
@@ -950,16 +1021,17 @@ def create_or_reset_diary_job(user_id, diary_date, mode="auto", force=False):
                     generated_at = NULL, push_state = 'NONE', push_retry_count = 0,
                     push_next_retry_at = NULL, push_started_at = NULL,
                     push_task_id = '', push_error = '', push_sent_at = NULL,
+                    diary_image_style = ?,
                     updated_at = ?
                 WHERE id = ?
-            """, (mode or "auto", now_str, existing["id"]))
+            """, (mode or "auto", diary_image_style, now_str, existing["id"]))
             diary_id = existing["id"]
         else:
             cursor.execute("""
                 INSERT INTO user_diary
-                (user_id, diary_date, state, mode, created_at, updated_at)
-                VALUES (?, ?, 'GENERATING', ?, ?, ?)
-            """, (user_id, diary_date, mode or "auto", now_str, now_str))
+                (user_id, diary_date, state, mode, diary_image_style, created_at, updated_at)
+                VALUES (?, ?, 'GENERATING', ?, ?, ?, ?)
+            """, (user_id, diary_date, mode or "auto", diary_image_style, now_str, now_str))
             diary_id = cursor.lastrowid
         conn.commit()
         return {"id": diary_id, "state": "GENERATING"}

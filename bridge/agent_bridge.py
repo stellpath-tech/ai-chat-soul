@@ -581,7 +581,79 @@ class AgentBridge:
         import time
         self._session_last_active[session_id] = time.time()
         return self.agents[session_id]
-    
+
+    def _reply_change_settings(self, agent, session_id, sentence, on_event, holder) -> Reply:
+        """change_settings 特殊流程（settings 页改名）。
+
+        message 是前端发送的完整改名句（"以后叫我X吧"/"以后叫你X吧"），后端不拼接。
+        模型回复 → 抽取器 judge_rename 判定（user/bear/denied/null + 新名）→ 按结果写库。
+        改名句与回复都不入 user_chat_message（change_settings 流程跳过记录）。
+        """
+        from config import conf as _conf
+        from agent.memory.thing_memory.extractor import judge_rename
+        from agent.memory.user_cache import get as _cache_get
+
+        sentence = (sentence or "").strip()
+        try:
+            reply = agent.run_stream(sentence, on_event=on_event, clear_history=False)
+        except Exception as e:
+            logger.warning(f"[AgentBridge] change_settings simulate failed: {e}")
+            reply = ""
+
+        user_id = session_id.replace("user_", "", 1) if session_id.startswith("user_") else session_id
+        try:
+            user_id = int(user_id)
+        except (TypeError, ValueError):
+            user_id = None
+
+        result, new_name = None, None
+        try:
+            _tm_api_key = (_conf().get("thing_memory_extractor_api_key")
+                           or _conf().get("open_ai_api_key", ""))
+            _tm_api_base = (_conf().get("thing_memory_extractor_api_base")
+                            or _conf().get("open_ai_api_base", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
+            _tm_model = _conf().get("thing_memory_extractor_model", "qwen3.5-flash")
+            _cache = _cache_get(self.workspace_root, session_id)
+            current_nick = (_cache or {}).get("nickname")
+            current_bear = None
+            if user_id is not None:
+                import channel.web.database as _db
+                current_bear = _db.get_bear_nickname(user_id)
+            result, new_name = judge_rename(
+                sentence, reply or "", current_nick, current_bear,
+                _tm_api_key, _tm_api_base, _tm_model,
+            )
+        except Exception as e:
+            logger.warning(f"[AgentBridge] change_settings judge_rename failed: {e}")
+
+        if result in ("user", "bear") and new_name:
+            try:
+                if user_id is not None:
+                    import channel.web.database as _db
+                    if result == "user":
+                        _db.update_user_nickname(user_id, new_name)
+                        from agent.memory.user_cache import update_nickname
+                        update_nickname(self.workspace_root, session_id, new_name)
+                        agent.runtime_info["user_nickname"] = new_name
+                        logger.info(f"[AgentBridge] change_settings renamed user {session_id} -> {new_name!r}")
+                    else:
+                        _db.update_user_bear_nickname(user_id, new_name)
+                        agent.runtime_info["bear_nickname"] = new_name
+                        logger.info(f"[AgentBridge] change_settings renamed bear {session_id} -> {new_name!r}")
+            except Exception as e:
+                logger.warning(f"[AgentBridge] change_settings apply failed: {e}")
+
+        if isinstance(holder, dict):
+            holder["value"] = result
+
+        try:
+            from agent.memory.user_cache import update_conversation
+            update_conversation(self.workspace_root, session_id, agent.messages)
+        except Exception:
+            pass
+
+        return Reply(ReplyType.TEXT, reply or "")
+
     def _init_shared_resources(self):
         """一次性初始化所有 session 共享的资源（启动时调用一次）。"""
         from config import conf
@@ -717,6 +789,21 @@ class AgentBridge:
             if not agent:
                 return Reply(ReplyType.ERROR, "Failed to initialize super agent")
 
+            # change_settings 特殊流程：settings 页改名，模拟 + 抽取器判定 + 按结果写库
+            if context and context.get("change_settings"):
+                try:
+                    event_handler = AgentEventHandler(context=context, original_callback=on_event)
+                    return self._reply_change_settings(
+                        agent,
+                        session_id,
+                        query or "",
+                        event_handler.handle_event,
+                        context.get("name_changed_holder"),
+                    )
+                except Exception as _cse:
+                    logger.exception(f"[AgentBridge] change_settings flow failed: {_cse}")
+                    return Reply(ReplyType.ERROR, f"Agent error: {_cse}")
+
             # Inject request-specific timezone into agent's runtime_info
             if context and context.get("timezone"):
                 agent.runtime_info["request_timezone"] = context.get("timezone")
@@ -736,22 +823,6 @@ class AgentBridge:
                 except Exception:
                     pass
 
-            # 每轮从 user 表读取曾用名（used_nickname）注入 runtime_info（session_id = user_{id}）
-            _user_former = []
-            if session_id and session_id.startswith("user_"):
-                try:
-                    import json as _json
-                    from agent.memory.thing_memory.store import _conn, db_path as _dbpath
-                    _uid = int(session_id[5:])
-                    with _conn(_dbpath(self.workspace_root)) as _dbconn:
-                        _row = _dbconn.execute(
-                            "SELECT used_nickname FROM user WHERE id=?", (_uid,)
-                        ).fetchone()
-                    if _row:
-                        _user_former = _json.loads(_row["used_nickname"] or "[]")
-                except Exception:
-                    pass
-            agent.runtime_info["user_former_names"] = _user_former
 
             # 前端在 GET /api/weather 时已拿到 sensor_label，直接注入（由 enable_sensor_label 开关控制）
             from config import conf as _conf
@@ -946,6 +1017,7 @@ class AgentBridge:
                 logger.info("[HeheHarness] Removed repeated 嘿嘿 from final bridge response")
 
             self._sanitize_image_blocks_for_history(agent.messages)
+
 
             # ThingMemory: fire-and-forget extraction
             if _conf().get("thing_memory_enabled", True) and session_id:

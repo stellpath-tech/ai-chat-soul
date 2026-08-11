@@ -12,11 +12,14 @@ from common.log import logger
 from config import conf
 import channel.web.database as db
 from channel.web.diary.prompts import (
-    IMAGE_NEGATIVE_PROMPT,
-    IMAGE_POSITIVE_PROMPT,
     KEY_MOMENT_SYSTEM_PROMPT,
     PRODUCT_DIARY_SYSTEM_PROMPT,
     REFERENCE_IMAGE,
+)
+from channel.web.diary.styles import (
+    DEFAULT_DIARY_IMAGE_STYLE,
+    get_diary_image_prompt,
+    normalize_diary_image_style,
 )
 from channel.web.diary.storage import decode_image_base64, store_diary_image
 from channel.web.push.service import deliver_generated_diary_notification
@@ -110,7 +113,10 @@ def generate_user_diary(user, diary_date):
         if resolved_mode == "normal" and not messages:
             raise ValueError("normal diary has no messages")
 
-        text_output = _generate_text(diary_date, transcript, resolved_mode)
+        diary_image_style = normalize_diary_image_style(job.get("diary_image_style"))
+        text_output = _generate_text(
+            diary_date, transcript, resolved_mode, diary_image_style=diary_image_style,
+        )
         image_urls = []
         if bool(_configured("diary_image_enabled", False)):
             image_urls = _generate_images(
@@ -134,8 +140,9 @@ def generate_user_diary(user, diary_date):
         )
         deliver_generated_diary_notification(user["id"], diary_date)
         logger.info(
-            "[Diary] generated user=%s date=%s mode=%s messages=%s images=%s",
-            user["id"], diary_date, resolved_mode, len(messages), len(image_urls),
+            "[Diary] generated user=%s date=%s mode=%s style=%s messages=%s images=%s",
+            user["id"], diary_date, resolved_mode, diary_image_style,
+            len(messages), len(image_urls),
         )
         return {"state": "DONE", "title": title, "imageUrls": image_urls}
     except Exception as error:
@@ -171,7 +178,10 @@ def _build_transcript(messages):
     return result
 
 
-def _generate_text(diary_date, transcript, resolved_mode):
+def _generate_text(
+    diary_date, transcript, resolved_mode,
+    diary_image_style=DEFAULT_DIARY_IMAGE_STYLE,
+):
     min_chars = max(80, int(_configured("diary_v29_min_chars", 160)))
     max_chars = max(min_chars, int(_configured("diary_v29_max_chars", 700)))
     transcript_json = json.dumps(transcript, ensure_ascii=False)
@@ -222,7 +232,7 @@ def _generate_text(diary_date, transcript, resolved_mode):
                 "summary": key_moments[0][:80],
                 "diary": content,
                 "key_moments": key_moments,
-                "image_prompts": _build_image_prompts(key_moments),
+                "image_prompts": _build_image_prompts(key_moments, diary_image_style),
             }
         except Exception as error:
             last_error = error
@@ -297,24 +307,26 @@ def _validate_diary(content, min_chars=None, max_chars=None):
     return errors
 
 
-def _build_image_prompts(key_moments):
+def _build_image_prompts(key_moments, diary_image_style=DEFAULT_DIARY_IMAGE_STYLE):
     moments = [str(moment).strip() for moment in key_moments[:4] if str(moment).strip()]
     if not moments:
         return []
+    style_prompt = get_diary_image_prompt(diary_image_style)
     numbered_moments = "\n".join(
         "{}：{}".format(index + 1, moment)
         for index, moment in enumerate(moments)
     )
     return [{
         "scene": "；".join(moments),
+        "style": style_prompt["style"],
         "positive_prompt": (
-            IMAGE_POSITIVE_PROMPT
+            style_prompt["positive_prompt"]
             + "\n\n【已填写的 key moments（共 {} 条，请严格生成 {} 个拼接小画面）】：\n".format(
                 len(moments), len(moments),
             )
             + numbered_moments
         ),
-        "negative_prompt": IMAGE_NEGATIVE_PROMPT,
+        "negative_prompt": style_prompt["negative_prompt"],
     }]
 
 

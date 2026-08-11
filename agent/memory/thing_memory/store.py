@@ -158,37 +158,72 @@ def is_duplicate(workspace_root: str, user_id: str, event: str) -> bool:
 
 _NICK_INTENT = ("被叫", "希望叫", "想叫", "称呼", "昵称", "叫我", "改叫", "不要叫")
 
+FORMER_NICKNAME_PREFIX = "用户曾用昵称"
+
+
+def is_nickname_intent_event(event: str) -> bool:
+    """事件是否是"用户对自己称呼的设置/更换"类描述（昵称走独立通道，不入事件记忆）。"""
+    if event.startswith(FORMER_NICKNAME_PREFIX):
+        return False
+    return any(k in event for k in _NICK_INTENT)
+
 
 def _is_nickname_pref_event(event: str, former_names: list) -> bool:
     """双条件判断：事件含昵称意图词 且 含某个曾用名，才视为过期昵称偏好事件。
 
     避免误伤主题词记忆（如"用户提到仿真青蛙树脂摆件"含"青蛙"但无昵称意图词）。
+    已是曾用昵称格式的记录不再匹配（防止换名链上被反复改写）。
     """
+    if event.startswith(FORMER_NICKNAME_PREFIX):
+        return False
     if not any(k in event for k in _NICK_INTENT):
         return False
     return any(n in event for n in former_names)
 
 
-def tag_former_nickname_memories(workspace_root: str, user_id: str, former_names: list) -> int:
-    """把引用曾用名的昵称偏好记忆标记为 superseded，返回打标条数。"""
+def tag_former_nickname_memories(
+    workspace_root: str,
+    user_id: str,
+    former_names: list,
+    new_nickname: Optional[str] = None,
+) -> int:
+    """昵称更换后处理引用旧昵称的记忆：
+    - 提供 new_nickname 时，改写为自消歧的曾用昵称格式并保持 active
+      （如 用户曾用昵称"芒果"（2026-08-06 起改用"雪糕"）），历史可追问、单条不冲突；
+    - 未提供时退化为原行为（标记 superseded 退出注入）。
+    返回处理条数。"""
     if not former_names:
         return 0
+    import datetime as _dt
+    today = _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8))).strftime("%Y-%m-%d")
     path = db_path(workspace_root)
+    count = 0
     with _conn(path) as conn:
         rows = conn.execute(
             "SELECT id, event FROM thing_memory WHERE user_id=? AND status='active'",
             (user_id,),
         ).fetchall()
-        matched = [r["id"] for r in rows if _is_nickname_pref_event(r["event"], former_names)]
-        if matched:
-            conn.executemany(
-                "UPDATE thing_memory SET status='superseded' WHERE id=? AND status='active'",
-                [(m,) for m in matched],
-            )
+        for r in rows:
+            if not _is_nickname_pref_event(r["event"], former_names):
+                continue
+            if new_nickname:
+                old = next((n for n in former_names if n in r["event"]), former_names[0])
+                rewritten = f'{FORMER_NICKNAME_PREFIX}"{old}"（{today} 起改用"{new_nickname}"）'
+                conn.execute(
+                    "UPDATE thing_memory SET event=? WHERE id=? AND status='active'",
+                    (rewritten, r["id"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE thing_memory SET status='superseded' WHERE id=? AND status='active'",
+                    (r["id"],),
+                )
+            count += 1
+        if count:
             conn.commit()
     # 失效内存缓存，否则进程内仍会注入旧记忆
     _invalidate(workspace_root, user_id)
-    return len(matched)
+    return count
 
 
 def _normalize(text: str) -> str:
