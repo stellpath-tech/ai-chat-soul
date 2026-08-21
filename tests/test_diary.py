@@ -65,6 +65,17 @@ class DiaryDatabaseTest(unittest.TestCase):
     def test_failed_job_retries_then_skips(self):
         job = db.create_or_reset_diary_job(self.user_id, "2026-07-08")
         self.assertEqual("GENERATING", db.fail_diary_job(job["id"], "first", max_retries=2))
+        with closing(db.get_db()) as conn:
+            conn.execute(
+                "UPDATE user_diary SET next_retry_at = '2000-01-01 00:00:00' WHERE id = ?",
+                (job["id"],),
+            )
+            conn.commit()
+        targets = db.list_due_diary_generation_targets()
+        self.assertEqual(
+            [(self.user_id, "2026-07-08")],
+            [(target["user"]["id"], target["diary_date"]) for target in targets],
+        )
         self.assertEqual("SKIPPED", db.fail_diary_job(job["id"], "second", max_retries=2))
 
     def test_image_style_defaults_updates_and_is_snapshotted_per_diary(self):
@@ -122,17 +133,15 @@ class DiaryDatabaseTest(unittest.TestCase):
         ), patch.object(
             service, "deliver_generated_diary_notification",
         ) as deliver_notification:
-            result = service.generate_user_diary(
-                user, "2026-07-09", deliver_notification=False,
-            )
-        deliver_notification.assert_not_called()
+            result = service.generate_user_diary(user, "2026-07-09")
+        deliver_notification.assert_called_once_with(self.user_id, "2026-07-09")
         self.assertEqual("DONE", result["state"])
         with closing(db.get_db()) as conn:
             diary = conn.execute("SELECT * FROM user_diary WHERE id = 1").fetchone()
             card = conn.execute("SELECT * FROM user_chat_message WHERE message_type = 'card'").fetchone()
         self.assertEqual("DONE", diary["state"])
         self.assertEqual("normal", diary["mode"])
-        self.assertEqual("SKIPPED", diary["push_state"])
+        self.assertEqual("PENDING", diary["push_state"])
         self.assertEqual("团团的日记", diary["title"])
         self.assertEqual("团团的日记", card["diary_title"])
         db.update_user_bear_nickname(self.user_id, "麦麦")
@@ -146,6 +155,49 @@ class DiaryDatabaseTest(unittest.TestCase):
         self.assertIn(
             'diary_generation_total{mode="normal",result="success"}', metrics,
         )
+
+    def test_regenerating_already_notified_diary_does_not_push_twice(self):
+        db.create_or_reset_diary_job(self.user_id, "2026-07-09")
+        claimed = db.claim_diary_job(self.user_id, "2026-07-09")
+        db.complete_diary_job(
+            claimed["id"], "旧标题", "旧正文", "旧摘要", [],
+            "", "normal", [], "old-hash",
+        )
+        db.mark_diary_push_sent(claimed["id"], "existing-task")
+        retried = db.prepare_diary_job_for_date_retry(
+            self.user_id, "2026-07-09", retry_done_without_image=True,
+        )
+        self.assertEqual("retried_missing_image", retried["action"])
+
+        generated_text = {
+            "summary": "新摘要",
+            "diary": "新正文第一段。\n\n新正文第二段。",
+            "image_prompts": [],
+        }
+        settings = {
+            "diary_quiet_message_threshold": 0,
+            "diary_image_enabled": False,
+            "diary_max_retries": 3,
+        }
+        user = db.list_active_users_for_diary()[0]
+        with patch.object(
+            service, "_configured", side_effect=lambda name, default=None: settings.get(name, default),
+        ), patch.object(
+            service, "_generate_text", return_value=generated_text,
+        ), patch.object(
+            service, "deliver_generated_diary_notification",
+        ) as deliver_notification:
+            result = service.generate_user_diary(user, "2026-07-09")
+
+        self.assertEqual("DONE", result["state"])
+        deliver_notification.assert_not_called()
+        with closing(db.get_db()) as conn:
+            diary = conn.execute(
+                "SELECT push_state, should_push_on_generation_success FROM user_diary WHERE id = ?",
+                (claimed["id"],),
+            ).fetchone()
+        self.assertEqual("SKIPPED", diary["push_state"])
+        self.assertEqual(0, diary["should_push_on_generation_success"])
 
     def test_prepare_date_retry_checks_existing_job_state(self):
         missing = db.prepare_diary_job_for_date_retry(
@@ -176,6 +228,12 @@ class DiaryDatabaseTest(unittest.TestCase):
         )
         self.assertEqual("retried_missing_image", retried["action"])
         self.assertEqual("GENERATING", retried["state"])
+        with closing(db.get_db()) as conn:
+            push_policy = conn.execute(
+                "SELECT should_push_on_generation_success FROM user_diary WHERE id = ?",
+                (claimed["id"],),
+            ).fetchone()["should_push_on_generation_success"]
+        self.assertEqual(1, push_policy)
 
         running = db.create_or_reset_diary_job(self.user_id, "2026-07-09", force=True)
         self.assertEqual(running["id"], db.claim_diary_job(self.user_id, "2026-07-09")["id"])
@@ -368,11 +426,44 @@ class DiaryWorkerTest(unittest.TestCase):
 
         self.assertEqual(3, prepare.call_count)
         self.assertEqual(2, generate.call_count)
-        self.assertTrue(all(item.args[2] is False for item in generate.call_args_list))
+        self.assertTrue(all(len(item.args) == 2 for item in generate.call_args_list))
         self.assertEqual(3, result["checked"])
         self.assertEqual(2, result["scheduled"])
         self.assertEqual(2, result["processed"])
         self.assertEqual(1, result["actions"]["skipped_done"])
+
+    def test_due_retry_batch_processes_persisted_generation_targets(self):
+        targets = [{
+            "user": {"id": 7, "tz_iana": "Asia/Shanghai", "tz_offset_min": 480},
+            "diary_date": "2026-07-09",
+        }]
+        settings = {"diary_generation_workers": 5, "diary_retry_scan_limit": 100}
+        with patch.object(worker, "conf", return_value=settings), patch.object(
+            worker.db, "list_due_diary_generation_targets", return_value=targets,
+        ) as list_due, patch.object(
+            worker, "generate_user_diary", return_value={"state": "DONE"},
+        ) as generate:
+            processed = worker.run_due_diary_retries_once()
+
+        list_due.assert_called_once_with(limit=100)
+        generate.assert_called_once_with(targets[0]["user"], "2026-07-09")
+        self.assertEqual("DONE", processed[0]["state"])
+
+    def test_worker_iteration_prioritizes_scheduled_before_due_retries(self):
+        order = []
+        with patch.object(
+            worker, "run_scheduled_diaries_once",
+            side_effect=lambda: order.append("scheduled") or [],
+        ), patch.object(
+            worker, "run_due_diary_retries_once",
+            side_effect=lambda: order.append("due") or [],
+        ), patch.object(
+            worker, "retry_pending_diary_notifications",
+            side_effect=lambda: order.append("push") or [],
+        ):
+            worker.run_diary_worker_iteration()
+
+        self.assertEqual(["scheduled", "due", "push"], order)
 
     def test_admin_date_retry_endpoint_triggers_async_batch(self):
         web_channel.web.ctx.env = {

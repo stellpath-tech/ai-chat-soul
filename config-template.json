@@ -17,6 +17,7 @@
   "diary_generation_hour": 1,
   "diary_generation_day_offset": 1,
   "diary_generation_workers": 5,
+  "diary_retry_scan_limit": 100,
   "diary_v29_min_chars": 160,
   "diary_v29_max_chars": 700,
   "diary_text_model": "",

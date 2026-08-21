@@ -99,7 +99,7 @@ def _run_manual_job(user, diary_date):
             _MANUAL_THREADS.discard(current)
 
 
-def generate_user_diary(user, diary_date, deliver_notification=True):
+def generate_user_diary(user, diary_date):
     job = db.claim_diary_job(user["id"], diary_date)
     if not job:
         return None
@@ -147,12 +147,15 @@ def generate_user_diary(user, diary_date, deliver_notification=True):
             user["id"], title, summary, weather_text=weather_text,
             request_id="diary:{}".format(diary_date),
         )
-        if deliver_notification:
+        should_push_on_success = bool(int(job.get("should_push_on_generation_success", 1)))
+        if should_push_on_success:
             deliver_generated_diary_notification(user["id"], diary_date)
         else:
-            db.mark_diary_push_skipped(job["id"], "manual date retry does not notify")
+            db.mark_diary_push_skipped(
+                job["id"], "diary notification was already sent before regeneration",
+            )
             logger.info(
-                "[DiaryPush] skipped for manual date retry user=%s date=%s",
+                "[DiaryPush] skipped after already-notified diary regeneration user=%s date=%s",
                 user["id"], diary_date,
             )
         logger.info(
