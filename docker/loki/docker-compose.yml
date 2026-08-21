@@ -10,6 +10,11 @@ services:
     ports:
       - "3100:3100"
     command: -config.file=/etc/loki/loki-config.yaml
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     volumes:
       - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
       - loki-data:/loki
