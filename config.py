@@ -104,6 +104,7 @@ available_setting = {
     "diary_generation_hour": 1,
     "diary_generation_day_offset": 1,
     "diary_generation_workers": 5,
+    "diary_retry_scan_limit": 100,
     "diary_worker_poll_seconds": 300,
     "diary_quiet_message_threshold": 3,
     "diary_max_chars": 120,

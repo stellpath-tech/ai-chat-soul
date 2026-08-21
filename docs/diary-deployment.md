@@ -13,6 +13,8 @@
   "diary_worker_enabled": true,
   "diary_generation_hour": 23,
   "diary_generation_day_offset": 0,
+  "diary_generation_workers": 5,
+  "diary_retry_scan_limit": 100,
   "diary_worker_poll_seconds": 300,
   "diary_quiet_message_threshold": 3,
   "diary_max_chars": 120,
@@ -57,8 +59,9 @@ curl -X POST http://127.0.0.1:9899/api/admin/diary/retry \
 接口立即返回 `202`，后台检查该日期的所有活跃用户：缺失任务会补建，`SKIPPED`、
 待重试和超时未完成任务会重新生成；开启图片功能时，`DONE` 但 `imageUrls` 为空的
 任务也会重新生成。已经完整完成的任务和仍在正常运行的任务不会重复执行。批次检查数、
-调度数和完成数写入 `[Diary] date retry batch` 日志。该补偿批次不发送日记通知，
-任务完成后会把本次推送状态标记为 `SKIPPED`；正常每日任务的推送流程不受影响。
+调度数和完成数写入 `[Diary] date retry batch` 日志。补偿生成失败后，常驻 worker 会在
+`next_retry_at` 到期时继续处理，且每轮优先完成当天任务。此前从未成功推送的任务在补偿
+成功后正常发送通知；旧 `DONE` 无图任务如果已经发送过通知，则不会重复推送。
 完整调用、日志核对和异常处理流程见
 [指定日期日记批量补偿运维手册](./diary-admin-retry-runbook.md)。
 

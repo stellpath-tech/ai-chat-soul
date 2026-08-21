@@ -203,6 +203,7 @@ def init_db():
           push_task_id VARCHAR(255) NOT NULL DEFAULT '',
           push_error TEXT NOT NULL DEFAULT '',
           push_sent_at DATETIME DEFAULT NULL,
+          should_push_on_generation_success TINYINT NOT NULL DEFAULT 1,
           diary_image_style VARCHAR(32) NOT NULL DEFAULT 'warm_healing',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -230,9 +231,14 @@ def init_db():
             "push_task_id": "VARCHAR(255) NOT NULL DEFAULT ''",
             "push_error": "TEXT NOT NULL DEFAULT ''",
             "push_sent_at": "DATETIME DEFAULT NULL",
+            "should_push_on_generation_success": "TINYINT NOT NULL DEFAULT 1",
             "diary_image_style": "VARCHAR(32) NOT NULL DEFAULT 'warm_healing'",
         })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_diary_user_state_date ON user_diary(user_id, state, diary_date)")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_diary_generation_due "
+            "ON user_diary(state, next_retry_at, generation_started_at)"
+        )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_user_diary_push_pending "
             "ON user_diary(push_state, push_next_retry_at, push_started_at)"
@@ -996,6 +1002,40 @@ def list_active_users_for_diary():
         """).fetchall()
     return [dict(row) for row in rows]
 
+
+def list_due_diary_generation_targets(limit=100, stale_after_minutes=30):
+    now = _now_app_timezone()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    stale_before = (now - timedelta(minutes=stale_after_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    safe_limit = max(1, min(int(limit or 100), 1000))
+    with closing(get_db()) as conn:
+        rows = conn.execute("""
+            SELECT d.user_id, d.diary_date, u.tz_iana, u.tz_offset_min
+            FROM user_diary d
+            JOIN user u ON u.id = d.user_id
+            WHERE d.state = 'GENERATING'
+              AND u.account_status = 'active'
+              AND (
+                    (d.next_retry_at IS NOT NULL AND d.next_retry_at <= ?)
+                 OR (d.generation_started_at IS NOT NULL AND d.generation_started_at <= ?)
+                 OR (d.next_retry_at IS NULL AND d.generation_started_at IS NULL
+                     AND d.updated_at <= ?)
+              )
+            ORDER BY COALESCE(d.next_retry_at, d.updated_at), d.id
+            LIMIT ?
+        """, (now_str, stale_before, stale_before, safe_limit)).fetchall()
+    return [
+        {
+            "user": {
+                "id": row["user_id"],
+                "tz_iana": row["tz_iana"],
+                "tz_offset_min": row["tz_offset_min"],
+            },
+            "diary_date": row["diary_date"],
+        }
+        for row in rows
+    ]
+
 def create_or_reset_diary_job(user_id, diary_date, mode="auto", force=False):
     now_str = _now_app_timezone_str()
     with closing(get_db()) as conn:
@@ -1017,7 +1057,12 @@ def create_or_reset_diary_job(user_id, diary_date, mode="auto", force=False):
             return dict(existing)
         if existing:
             _reset_diary_job(
-                cursor, existing["id"], mode or "auto", diary_image_style, now_str,
+                cursor,
+                existing["id"],
+                mode or "auto",
+                diary_image_style,
+                now_str,
+                should_push_on_generation_success=True,
             )
             diary_id = existing["id"]
         else:
@@ -1052,7 +1097,7 @@ def prepare_diary_job_for_date_retry(
             return {"state": "", "action": "skipped_inactive"}
         diary_image_style = str(user["diary_image_style"] or DEFAULT_DIARY_IMAGE_STYLE)
         existing = cursor.execute("""
-            SELECT id, state, mode, image_urls, generation_started_at
+            SELECT id, state, mode, image_urls, generation_started_at, push_state
             FROM user_diary
             WHERE user_id = ? AND diary_date = ?
         """, (user_id, diary_date)).fetchone()
@@ -1070,6 +1115,7 @@ def prepare_diary_job_for_date_retry(
                 "action": "created_missing",
             }
 
+        should_push_on_generation_success = True
         if existing["state"] == "DONE":
             has_image = bool(_loads_json_array(existing["image_urls"]))
             if not retry_done_without_image or has_image:
@@ -1080,6 +1126,7 @@ def prepare_diary_job_for_date_retry(
                     "action": "skipped_done",
                 }
             action = "retried_missing_image"
+            should_push_on_generation_success = existing["push_state"] != "SENT"
         elif (
             existing["state"] == "GENERATING"
             and existing["generation_started_at"]
@@ -1102,6 +1149,7 @@ def prepare_diary_job_for_date_retry(
             str(existing["mode"] or "auto"),
             diary_image_style,
             now_str,
+            should_push_on_generation_success=should_push_on_generation_success,
         )
         conn.commit()
         return {
@@ -1111,7 +1159,14 @@ def prepare_diary_job_for_date_retry(
         }
 
 
-def _reset_diary_job(cursor, diary_id, mode, diary_image_style, now_str):
+def _reset_diary_job(
+    cursor,
+    diary_id,
+    mode,
+    diary_image_style,
+    now_str,
+    should_push_on_generation_success,
+):
     cursor.execute("""
         UPDATE user_diary
         SET state = 'GENERATING', mode = ?, title = '', content = '', summary = '',
@@ -1121,9 +1176,15 @@ def _reset_diary_job(cursor, diary_id, mode, diary_image_style, now_str):
             generated_at = NULL, push_state = 'NONE', push_retry_count = 0,
             push_next_retry_at = NULL, push_started_at = NULL,
             push_task_id = '', push_error = '', push_sent_at = NULL,
-            diary_image_style = ?, updated_at = ?
+            should_push_on_generation_success = ?, diary_image_style = ?, updated_at = ?
         WHERE id = ?
-    """, (mode or "auto", diary_image_style, now_str, diary_id))
+    """, (
+        mode or "auto",
+        1 if should_push_on_generation_success else 0,
+        diary_image_style,
+        now_str,
+        diary_id,
+    ))
 
 def claim_diary_job(user_id, diary_date, stale_after_minutes=30):
     now = _now_app_timezone()

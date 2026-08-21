@@ -108,8 +108,10 @@ curl -X POST 'http://127.0.0.1:9899/api/admin/diary/retry' \
 
 - 这里只检查日记生成状态 `user_diary.state`，不会因为 `push_state=SKIPPED` 而重试已经完成的日记。
 - 图片补偿会重新生成整篇日记正文和图片，不是只生成图片。
-- 补偿任务不发送通知；成功后写入 `state=DONE`、`push_state=SKIPPED`。
+- 从未成功推送的任务在补偿成功后正常发送通知；旧 `DONE` 无图任务如果已经是
+  `push_state=SENT`，重做成功后不会重复推送。
 - 同一进程内，同一日期同时只允许一个补偿批次。
+- 常驻 worker 每轮先处理当天正常任务，再处理 `next_retry_at` 已到期的历史任务。
 
 ## 三、标准操作流程 @TBD
 
@@ -117,7 +119,8 @@ curl -X POST 'http://127.0.0.1:9899/api/admin/diary/retry' \
 
 1. 确认目标日期，格式必须为 `YYYY-MM-DD`。该日期直接作为所有用户的日记业务日期，不做时区转换。
 2. 确认是否开启 `diary_image_enabled`。开启时，历史 `DONE` 但无图片的任务会被整篇重做。
-3. 确认本次重做不会发送日记通知。
+3. 确认通知影响：从未推送成功的任务会在补偿成功后发送通知；已经推送过的旧
+   `DONE` 无图任务不会重复发送。
 4. 首次使用或补偿范围较大时，先备份 `~/cow/data/soul.db`。
 5. 确认当前没有针对同一日期的人工补偿操作。
 
@@ -272,7 +275,9 @@ state=GENERATING + next_retry_at
 state=SKIPPED
 ```
 
-先根据 `generation failed` 的异常处理根因，再决定是否再次调用批量补偿接口。
+常驻 worker 会在 `next_retry_at` 到期后自动重试，并且优先处理当天正常任务。先根据
+`generation failed` 的异常处理根因并观察自动重试；只有任务进入 `SKIPPED`，或需要明确
+取消当前退避等待并立即重试时，才再次调用批量补偿接口。
 
 ## 五、Prometheus 核对 @TBD
 
@@ -302,7 +307,7 @@ sum by (result) (increase(diary_image_generation_total[30m]))
 - 本接口只允许管理员调用。
 - 本接口会修改指定日期需要补偿的 `user_diary` 任务记录。
 - 本接口会重新生成候选任务的正文和图片，可能产生模型调用费用。
-- 本接口不发送日记通知，正常每日任务的推送行为不变。
+- 从未推送成功的任务会在补偿成功后发送通知；已发送过的旧 `DONE` 无图任务不会重复推送。
 - 本接口不是只读检查，也不是预览接口。
 - 当前没有批次取消接口或批次状态接口，运行状态以 Loki 日志为准。
 - 不要因为 `push_state=SKIPPED` 重试任务；代码只根据日记生成状态和图片结果决定。

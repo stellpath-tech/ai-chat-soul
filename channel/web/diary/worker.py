@@ -14,6 +14,9 @@ _START_LOCK = threading.Lock()
 _STARTED = False
 _DATE_RETRY_LOCK = threading.Lock()
 _ACTIVE_DATE_RETRIES = set()
+_DIARY_GENERATION_EXECUTOR_LOCK = threading.Lock()
+_DIARY_GENERATION_EXECUTOR = None
+_DIARY_GENERATION_EXECUTOR_WORKERS = None
 
 
 def start_diary_worker():
@@ -48,11 +51,31 @@ def run_scheduled_diaries_once(now_utc=None):
     if not scheduled:
         return []
 
-    configured_workers = max(1, min(20, int(conf().get("diary_generation_workers", 5))))
+    configured_workers = _configured_diary_generation_workers()
     worker_count = min(configured_workers, len(scheduled))
     logger.info("[Diary] scheduled batch starting jobs=%s workers=%s", len(scheduled), worker_count)
-    processed = _generate_diary_jobs(scheduled, worker_count)
+    processed = _generate_diary_jobs(scheduled)
     logger.info("[Diary] scheduled batch complete processed=%s", len(processed))
+    return processed
+
+
+def run_due_diary_retries_once():
+    retry_scan_limit = max(1, min(1000, int(conf().get("diary_retry_scan_limit", 100))))
+    targets = db.list_due_diary_generation_targets(limit=retry_scan_limit)
+    scheduled = [
+        (target["user"], target["diary_date"])
+        for target in targets
+    ]
+    if not scheduled:
+        return []
+
+    worker_count = min(_configured_diary_generation_workers(), len(scheduled))
+    logger.info(
+        "[Diary] due retry batch starting jobs=%s workers=%s",
+        len(scheduled), worker_count,
+    )
+    processed = _generate_diary_jobs(scheduled)
+    logger.info("[Diary] due retry batch complete processed=%s", len(processed))
     return processed
 
 
@@ -88,15 +111,13 @@ def retry_diaries_for_date(diary_date):
         if job.get("state") == "GENERATING" and not action.startswith("skipped_"):
             scheduled.append((user, diary_date))
 
-    configured_workers = max(1, min(20, int(conf().get("diary_generation_workers", 5))))
+    configured_workers = _configured_diary_generation_workers()
     worker_count = min(configured_workers, len(scheduled)) if scheduled else 0
     logger.info(
         "[Diary] date retry batch starting date=%s checked=%s jobs=%s workers=%s actions=%s",
         diary_date, len(users), len(scheduled), worker_count, action_counts,
     )
-    processed = _generate_diary_jobs(
-        scheduled, worker_count, deliver_notification=False,
-    ) if scheduled else []
+    processed = _generate_diary_jobs(scheduled) if scheduled else []
     result = {
         "targetDate": diary_date,
         "checked": len(users),
@@ -118,40 +139,66 @@ def _run_diary_date_retry(diary_date):
             _ACTIVE_DATE_RETRIES.discard(diary_date)
 
 
-def _generate_diary_jobs(scheduled, worker_count, deliver_notification=True):
+def _configured_diary_generation_workers():
+    return max(1, min(20, int(conf().get("diary_generation_workers", 5))))
+
+
+def _get_diary_generation_executor():
+    global _DIARY_GENERATION_EXECUTOR, _DIARY_GENERATION_EXECUTOR_WORKERS
+    configured_workers = _configured_diary_generation_workers()
+    with _DIARY_GENERATION_EXECUTOR_LOCK:
+        if _DIARY_GENERATION_EXECUTOR is None:
+            _DIARY_GENERATION_EXECUTOR = ThreadPoolExecutor(
+                max_workers=configured_workers,
+                thread_name_prefix="diary-generate",
+            )
+            _DIARY_GENERATION_EXECUTOR_WORKERS = configured_workers
+        elif _DIARY_GENERATION_EXECUTOR_WORKERS != configured_workers:
+            logger.warning(
+                "[Diary] generation worker change requires restart configured=%s active=%s",
+                configured_workers, _DIARY_GENERATION_EXECUTOR_WORKERS,
+            )
+        return _DIARY_GENERATION_EXECUTOR
+
+
+def _generate_diary_jobs(scheduled):
     processed = []
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="diary-generate") as executor:
-        if deliver_notification:
-            futures = {
-                executor.submit(generate_user_diary, user, diary_date): (user, diary_date)
-                for user, diary_date in scheduled
-            }
-        else:
-            futures = {
-                executor.submit(generate_user_diary, user, diary_date, False): (user, diary_date)
-                for user, diary_date in scheduled
-            }
-        for future in as_completed(futures):
-            user, diary_date = futures[future]
-            try:
-                result = future.result()
-            except Exception:
-                logger.exception(
-                    "[Diary] scheduled generation failed user_id=%s date=%s",
-                    user["id"], diary_date,
-                )
-                continue
-            if result:
-                processed.append({"userId": user["id"], "date": diary_date, "state": result.get("state")})
+    executor = _get_diary_generation_executor()
+    futures = {
+        executor.submit(generate_user_diary, user, diary_date): (user, diary_date)
+        for user, diary_date in scheduled
+    }
+    for future in as_completed(futures):
+        user, diary_date = futures[future]
+        try:
+            result = future.result()
+        except Exception:
+            logger.exception(
+                "[Diary] scheduled generation failed user_id=%s date=%s",
+                user["id"], diary_date,
+            )
+            continue
+        if result:
+            processed.append({"userId": user["id"], "date": diary_date, "state": result.get("state")})
     return processed
+
+
+def run_diary_worker_iteration():
+    scheduled = run_scheduled_diaries_once()
+    due_retries = run_due_diary_retries_once()
+    push_retries = retry_pending_diary_notifications()
+    return {
+        "scheduled": scheduled,
+        "dueRetries": due_retries,
+        "pushRetries": push_retries,
+    }
 
 
 def _worker_loop():
     interval = max(30, int(conf().get("diary_worker_poll_seconds", 300)))
     while True:
         try:
-            run_scheduled_diaries_once()
-            retry_pending_diary_notifications()
+            run_diary_worker_iteration()
         except Exception:
             logger.exception("[Diary] worker iteration failed")
         time.sleep(interval)
