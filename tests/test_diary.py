@@ -6,7 +6,9 @@ import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import call, patch
+
+from prometheus_client import generate_latest
 
 import channel.web.database as db
 from channel.web.diary import service
@@ -97,6 +99,7 @@ class DiaryDatabaseTest(unittest.TestCase):
         self.assertEqual("chinese_ink", db.get_user_diary_image_style(self.user_id))
 
     def test_full_text_generation_writes_diary_and_card(self):
+        db.update_user_bear_nickname(self.user_id, "团团")
         db.create_or_reset_diary_job(self.user_id, "2026-07-09")
         key_moment_output = "1：用户把今天散步的小事分享给了满仓"
         diary_output = (
@@ -116,16 +119,109 @@ class DiaryDatabaseTest(unittest.TestCase):
         user = db.list_active_users_for_diary()[0]
         with patch.object(service, "_configured", side_effect=configured), patch.object(
             service, "_call_chat_model", side_effect=[key_moment_output, diary_output],
-        ):
-            result = service.generate_user_diary(user, "2026-07-09")
+        ), patch.object(
+            service, "deliver_generated_diary_notification",
+        ) as deliver_notification:
+            result = service.generate_user_diary(
+                user, "2026-07-09", deliver_notification=False,
+            )
+        deliver_notification.assert_not_called()
         self.assertEqual("DONE", result["state"])
         with closing(db.get_db()) as conn:
             diary = conn.execute("SELECT * FROM user_diary WHERE id = 1").fetchone()
             card = conn.execute("SELECT * FROM user_chat_message WHERE message_type = 'card'").fetchone()
         self.assertEqual("DONE", diary["state"])
         self.assertEqual("normal", diary["mode"])
-        self.assertEqual("满仓的日记", card["diary_title"])
+        self.assertEqual("SKIPPED", diary["push_state"])
+        self.assertEqual("团团的日记", diary["title"])
+        self.assertEqual("团团的日记", card["diary_title"])
+        db.update_user_bear_nickname(self.user_id, "麦麦")
+        with closing(db.get_db()) as conn:
+            stored_title = conn.execute(
+                "SELECT title FROM user_diary WHERE id = 1",
+            ).fetchone()["title"]
+        self.assertEqual("团团的日记", stored_title)
         self.assertIn("\n\n", diary["content"])
+        metrics = generate_latest().decode("utf-8")
+        self.assertIn(
+            'diary_generation_total{mode="normal",result="success"}', metrics,
+        )
+
+    def test_prepare_date_retry_checks_existing_job_state(self):
+        missing = db.prepare_diary_job_for_date_retry(
+            self.user_id, "2026-07-06", retry_done_without_image=True,
+        )
+        self.assertEqual("created_missing", missing["action"])
+
+        done_with_image = db.create_or_reset_diary_job(self.user_id, "2026-07-07")
+        claimed = db.claim_diary_job(self.user_id, "2026-07-07")
+        db.complete_diary_job(
+            claimed["id"], "title", "content", "summary", ["/image.png"],
+            "", "normal", [], "hash",
+        )
+        skipped = db.prepare_diary_job_for_date_retry(
+            self.user_id, "2026-07-07", retry_done_without_image=True,
+        )
+        self.assertEqual("skipped_done", skipped["action"])
+        self.assertEqual("DONE", skipped["state"])
+
+        done_without_image = db.create_or_reset_diary_job(self.user_id, "2026-07-08")
+        claimed = db.claim_diary_job(self.user_id, "2026-07-08")
+        db.complete_diary_job(
+            claimed["id"], "title", "content", "summary", [],
+            "", "normal", [], "hash",
+        )
+        retried = db.prepare_diary_job_for_date_retry(
+            self.user_id, "2026-07-08", retry_done_without_image=True,
+        )
+        self.assertEqual("retried_missing_image", retried["action"])
+        self.assertEqual("GENERATING", retried["state"])
+
+        running = db.create_or_reset_diary_job(self.user_id, "2026-07-09", force=True)
+        self.assertEqual(running["id"], db.claim_diary_job(self.user_id, "2026-07-09")["id"])
+        skipped_running = db.prepare_diary_job_for_date_retry(
+            self.user_id, "2026-07-09", retry_done_without_image=True,
+        )
+        self.assertEqual("skipped_running", skipped_running["action"])
+
+    def test_image_failure_enters_whole_diary_retry_without_card_or_push(self):
+        db.create_or_reset_diary_job(self.user_id, "2026-07-09")
+        key_moment_output = "1：用户把今天散步的小事分享给了满仓"
+        diary_output = (
+            "今天听见你说去散步了，我把那阵风认真收进了谷仓。" * 4
+            + "\n\n"
+            + "等到夜里再想起来，这仍是一件值得保存的小满足。" * 4
+        )
+        settings = {
+            "diary_quiet_message_threshold": 0,
+            "diary_v29_min_chars": 20,
+            "diary_v29_max_chars": 700,
+            "diary_image_enabled": True,
+            "diary_max_retries": 3,
+        }
+        configured = lambda name, default=None: settings.get(name, default)
+        user = db.list_active_users_for_diary()[0]
+        with patch.object(service, "_configured", side_effect=configured), patch.object(
+            service, "_call_chat_model", side_effect=[key_moment_output, diary_output],
+        ), patch.object(
+            service, "_call_image_model", side_effect=RuntimeError("image failed"),
+        ), patch.object(
+            service, "deliver_generated_diary_notification",
+        ) as deliver_notification:
+            result = service.generate_user_diary(user, "2026-07-09")
+
+        self.assertEqual("GENERATING", result["state"])
+        deliver_notification.assert_not_called()
+        with closing(db.get_db()) as conn:
+            diary = conn.execute("SELECT * FROM user_diary WHERE id = 1").fetchone()
+            card_count = conn.execute(
+                "SELECT COUNT(*) FROM user_chat_message WHERE message_type = 'card'",
+            ).fetchone()[0]
+        self.assertEqual("GENERATING", diary["state"])
+        self.assertEqual(1, diary["retry_count"])
+        self.assertIsNotNone(diary["next_retry_at"])
+        self.assertIsNone(diary["generated_at"])
+        self.assertEqual(0, card_count)
 
 
 class DiaryServiceTest(unittest.TestCase):
@@ -187,6 +283,29 @@ class DiaryServiceTest(unittest.TestCase):
             self.assertTrue(url.startswith("https://cdn.example.test/diary-images/diary/"))
             self.assertNotIn("2026-07-09", url)
 
+    def test_image_request_keeps_existing_retries_and_logs_each_attempt(self):
+        settings = {
+            "diary_image_api_key": "test-key",
+            "diary_image_api_base": "https://api.openai.com/v1",
+            "diary_image_model": "gpt-image-2",
+            "diary_reference_image_enabled": False,
+        }
+        configured = lambda name, default=None: settings.get(name, default)
+        error = service.requests.exceptions.SSLError("unexpected eof")
+        prompt = {"positive_prompt": "温暖场景", "negative_prompt": "不要文字"}
+        with patch.object(service, "_configured", side_effect=configured), patch.object(
+            service.requests, "post", side_effect=error,
+        ) as post, patch.object(service.time, "sleep") as sleep, patch.object(
+            service.logger, "warning",
+        ) as warning:
+            with self.assertRaises(service.requests.exceptions.SSLError):
+                service._call_image_model(prompt, image_trace_id="trace-test")
+
+        self.assertEqual(4, post.call_count)
+        self.assertEqual([call(2), call(5), call(10)], sleep.call_args_list)
+        self.assertEqual(4, warning.call_count)
+        self.assertTrue(all(item.args[1] == "trace-test" for item in warning.call_args_list))
+
 
 class DiaryWorkerTest(unittest.TestCase):
     def test_scheduled_generation_runs_at_most_five_in_parallel(self):
@@ -225,6 +344,52 @@ class DiaryWorkerTest(unittest.TestCase):
         self.assertEqual(10, len(processed))
         self.assertEqual(5, peak)
         self.assertEqual({"2026-07-16"}, {item["date"] for item in processed})
+
+    def test_date_retry_checks_all_users_and_runs_only_candidates(self):
+        users = [
+            {"id": 1, "tz_iana": "Asia/Shanghai", "tz_offset_min": 480},
+            {"id": 2, "tz_iana": "Asia/Shanghai", "tz_offset_min": 480},
+            {"id": 3, "tz_iana": "Asia/Shanghai", "tz_offset_min": 480},
+        ]
+        jobs = [
+            {"state": "DONE", "action": "skipped_done"},
+            {"state": "GENERATING", "action": "retried_missing_image"},
+            {"state": "GENERATING", "action": "created_missing"},
+        ]
+        settings = {"diary_generation_workers": 5, "diary_image_enabled": True}
+        with patch.object(worker, "conf", return_value=settings), patch.object(
+            worker.db, "list_active_users_for_diary", return_value=users,
+        ), patch.object(
+            worker.db, "prepare_diary_job_for_date_retry", side_effect=jobs,
+        ) as prepare, patch.object(
+            worker, "generate_user_diary", return_value={"state": "DONE"},
+        ) as generate:
+            result = worker.retry_diaries_for_date("2026-07-16")
+
+        self.assertEqual(3, prepare.call_count)
+        self.assertEqual(2, generate.call_count)
+        self.assertTrue(all(item.args[2] is False for item in generate.call_args_list))
+        self.assertEqual(3, result["checked"])
+        self.assertEqual(2, result["scheduled"])
+        self.assertEqual(2, result["processed"])
+        self.assertEqual(1, result["actions"]["skipped_done"])
+
+    def test_admin_date_retry_endpoint_triggers_async_batch(self):
+        web_channel.web.ctx.env = {
+            "HTTP_X_ADMIN_PASSCODE": web_channel.COMPLAINT_ADMIN_PASSCODE,
+        }
+        handler = web_channel.DiaryDateRetryHandler()
+        with patch.object(web_channel.web, "header"), patch.object(
+            web_channel.web, "data", return_value=b'{"targetDate":"2026-07-16"}',
+        ), patch.object(
+            worker, "trigger_diary_date_retry",
+            return_value={"targetDate": "2026-07-16", "started": True},
+        ) as trigger:
+            response = json.loads(handler.POST())
+
+        self.assertTrue(response["success"])
+        self.assertEqual("2026-07-16", response["data"]["targetDate"])
+        trigger.assert_called_once_with("2026-07-16")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,21 @@ curl -X POST http://127.0.0.1:9899/api/diary \
 接口返回 `202` 后，通过 `GET /api/diary?ts=...` 轮询状态。成功状态为 `DONE`；
 单次失败会按 5、10 分钟退避重试，达到 `diary_max_retries` 后为 `SKIPPED`。
 
+运营需要检查并重试某一天的全部用户任务时，使用管理员接口：
+
+```bash
+curl -X POST http://127.0.0.1:9899/api/admin/diary/retry \
+  -H 'Content-Type: application/json' \
+  -H 'X-Admin-Passcode: ADMIN_PASSCODE' \
+  -d '{"targetDate":"2026-07-09"}'
+```
+
+接口立即返回 `202`，后台检查该日期的所有活跃用户：缺失任务会补建，`SKIPPED`、
+待重试和超时未完成任务会重新生成；开启图片功能时，`DONE` 但 `imageUrls` 为空的
+任务也会重新生成。已经完整完成的任务和仍在正常运行的任务不会重复执行。批次检查数、
+调度数和完成数写入 `[Diary] date retry batch` 日志。该补偿批次不发送日记通知，
+任务完成后会把本次推送状态标记为 `SKIPPED`；正常每日任务的推送流程不受影响。
+
 ## 第二阶段：开启生图
 
 本机文件存储适用于单实例验证：
@@ -77,8 +92,9 @@ curl -X POST http://127.0.0.1:9899/api/diary \
 }
 ```
 
-OSS RAM 账号只需要目标 bucket 的 `PutObject` 权限。图片失败不会回滚已经生成的文字；
-当天日记仍会进入 `DONE`，但 `imageUrls` 可能为空。
+OSS RAM 账号只需要目标 bucket 的 `PutObject` 权限。单次图片请求最多尝试 4 次；
+全部失败后整篇日记进入现有任务重试流程，不写入 `DONE`，也不创建卡片或发送通知。
+达到 `diary_max_retries` 后任务进入 `SKIPPED`，可通过管理员日期补偿接口重新检查。
 
 ## TIMPush 通知
 

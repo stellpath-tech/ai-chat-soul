@@ -21,6 +21,24 @@ HTTP_REQUEST_DURATION = Histogram(
     ['method', 'endpoint']
 )
 
+DIARY_GENERATION_TOTAL = Counter(
+    'diary_generation_total',
+    'Completed diary generation jobs',
+    ['result', 'mode']
+)
+
+DIARY_GENERATION_DURATION = Histogram(
+    'diary_generation_duration_seconds',
+    'End-to-end diary generation latency',
+    ['result', 'mode']
+)
+
+DIARY_IMAGE_GENERATION_TOTAL = Counter(
+    'diary_image_generation_total',
+    'Completed diary image generation attempts',
+    ['result']
+)
+
 def metrics_processor(handler):
     """Middleware to track request counts and durations."""
     start_time = time.time()

@@ -11,6 +11,11 @@ import requests
 from common.log import logger
 from config import conf
 import channel.web.database as db
+from channel.web.metrics import (
+    DIARY_GENERATION_DURATION,
+    DIARY_GENERATION_TOTAL,
+    DIARY_IMAGE_GENERATION_TOTAL,
+)
 from channel.web.diary.prompts import (
     KEY_MOMENT_SYSTEM_PROMPT,
     PRODUCT_DIARY_SYSTEM_PROMPT,
@@ -94,10 +99,12 @@ def _run_manual_job(user, diary_date):
             _MANUAL_THREADS.discard(current)
 
 
-def generate_user_diary(user, diary_date):
+def generate_user_diary(user, diary_date, deliver_notification=True):
     job = db.claim_diary_job(user["id"], diary_date)
     if not job:
         return None
+    generation_started_at = time.monotonic()
+    metric_mode = "unknown"
     try:
         start_at, end_at = diary_window(user, diary_date)
         messages = db.list_chat_messages_in_window(user["id"], start_at, end_at)
@@ -110,6 +117,7 @@ def generate_user_diary(user, diary_date):
         threshold = max(0, int(_configured("diary_quiet_message_threshold", 3)))
         mode = str(job.get("mode") or "auto").lower()
         resolved_mode = "quiet" if mode == "quiet" or (mode == "auto" and len(messages) < threshold) else "normal"
+        metric_mode = resolved_mode
         if resolved_mode == "normal" and not messages:
             raise ValueError("normal diary has no messages")
 
@@ -127,7 +135,8 @@ def generate_user_diary(user, diary_date):
         transcript_hash = hashlib.sha256(
             json.dumps(transcript, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()
-        title = str(text_output.get("title") or "满仓的日记").strip()
+        bear_name = str(db.get_bear_nickname(user["id"]) or "满仓").strip() or "满仓"
+        title = "{}的日记".format(bear_name)
         summary = str(text_output.get("summary") or "满仓记下了今天的一点陪伴").strip()
         content = str(text_output["diary"]).strip()
         db.complete_diary_job(
@@ -138,15 +147,30 @@ def generate_user_diary(user, diary_date):
             user["id"], title, summary, weather_text=weather_text,
             request_id="diary:{}".format(diary_date),
         )
-        deliver_generated_diary_notification(user["id"], diary_date)
+        if deliver_notification:
+            deliver_generated_diary_notification(user["id"], diary_date)
+        else:
+            db.mark_diary_push_skipped(job["id"], "manual date retry does not notify")
+            logger.info(
+                "[DiaryPush] skipped for manual date retry user=%s date=%s",
+                user["id"], diary_date,
+            )
         logger.info(
             "[Diary] generated user=%s date=%s mode=%s style=%s messages=%s images=%s",
             user["id"], diary_date, resolved_mode, diary_image_style,
             len(messages), len(image_urls),
         )
+        DIARY_GENERATION_TOTAL.labels(result="success", mode=metric_mode).inc()
+        DIARY_GENERATION_DURATION.labels(
+            result="success", mode=metric_mode,
+        ).observe(time.monotonic() - generation_started_at)
         return {"state": "DONE", "title": title, "imageUrls": image_urls}
     except Exception as error:
         state = db.fail_diary_job(job["id"], error, max_retries=int(_configured("diary_max_retries", 3)))
+        DIARY_GENERATION_TOTAL.labels(result="failure", mode=metric_mode).inc()
+        DIARY_GENERATION_DURATION.labels(
+            result="failure", mode=metric_mode,
+        ).observe(time.monotonic() - generation_started_at)
         logger.exception(
             "[Diary] generation failed user=%s date=%s next_state=%s",
             user["id"], diary_date, state,
@@ -228,7 +252,6 @@ def _generate_text(
             if errors:
                 raise ValueError("; ".join(errors))
             return {
-                "title": "满仓的日记",
                 "summary": key_moments[0][:80],
                 "diary": content,
                 "key_moments": key_moments,
@@ -333,21 +356,27 @@ def _build_image_prompts(key_moments, diary_image_style=DEFAULT_DIARY_IMAGE_STYL
 def _generate_images(user_id, diary_date, prompts, resolved_mode):
     results = []
     for index, prompt in enumerate(prompts[:1]):
+        image_trace_id = uuid.uuid4().hex[:16]
         try:
-            image_bytes, content_type = _call_image_model(prompt)
+            image_bytes, content_type = _call_image_model(
+                prompt, image_trace_id=image_trace_id,
+            )
             public_url = store_diary_image(
                 user_id, diary_date, uuid.uuid4().hex, image_bytes, content_type,
             )
             results.append(public_url)
+            DIARY_IMAGE_GENERATION_TOTAL.labels(result="success").inc()
         except Exception:
+            DIARY_IMAGE_GENERATION_TOTAL.labels(result="failure").inc()
             logger.exception(
-                "[Diary] image generation failed user=%s date=%s index=%s mode=%s",
-                user_id, diary_date, index, resolved_mode,
+                "[Diary] image generation failed user=%s date=%s index=%s mode=%s trace_id=%s",
+                user_id, diary_date, index, resolved_mode, image_trace_id,
             )
+            raise
     return results
 
 
-def _call_image_model(prompt):
+def _call_image_model(prompt, image_trace_id=""):
     api_key = str(_configured("diary_image_api_key", "") or _configured("open_ai_api_key", "") or "")
     api_base = str(_configured("diary_image_api_base", "") or "https://api.openai.com/v1").rstrip("/")
     model = str(_configured("diary_image_model", "gpt-image-2"))
@@ -366,6 +395,14 @@ def _call_image_model(prompt):
     for attempt in range(4):
         if attempt:
             time.sleep((2, 5, 10)[attempt - 1])
+        attempt_number = attempt + 1
+        attempt_started_at = time.monotonic()
+        response = None
+        logger.info(
+            "[Diary] image request started trace_id=%s attempt=%s/4 endpoint=%s model=%s",
+            image_trace_id, attempt_number,
+            "edits" if reference_bytes else "generations", model,
+        )
         try:
             if reference_bytes:
                 response = requests.post(
@@ -385,12 +422,39 @@ def _call_image_model(prompt):
             response.raise_for_status()
             item = response.json()["data"][0]
             if item.get("b64_json"):
-                return decode_image_base64(item["b64_json"]), "image/png"
+                image_bytes = decode_image_base64(item["b64_json"])
+                logger.info(
+                    "[Diary] image request succeeded trace_id=%s attempt=%s/4 endpoint=%s http_status=%s duration_ms=%s output=base64 bytes=%s",
+                    image_trace_id, attempt_number,
+                    "edits" if reference_bytes else "generations",
+                    response.status_code,
+                    int((time.monotonic() - attempt_started_at) * 1000),
+                    len(image_bytes),
+                )
+                return image_bytes, "image/png"
             if item.get("url"):
                 downloaded = requests.get(item["url"], timeout=(10, 120))
                 downloaded.raise_for_status()
-                return downloaded.content, downloaded.headers.get("Content-Type", "image/png").split(";", 1)[0]
+                content_type = downloaded.headers.get("Content-Type", "image/png").split(";", 1)[0]
+                logger.info(
+                    "[Diary] image request succeeded trace_id=%s attempt=%s/4 endpoint=%s http_status=%s download_status=%s duration_ms=%s output=url bytes=%s",
+                    image_trace_id, attempt_number,
+                    "edits" if reference_bytes else "generations",
+                    response.status_code, downloaded.status_code,
+                    int((time.monotonic() - attempt_started_at) * 1000),
+                    len(downloaded.content),
+                )
+                return downloaded.content, content_type
             raise ValueError("image response has neither b64_json nor url")
         except Exception as error:
             last_error = error
+            error_response = getattr(error, "response", None)
+            logger.warning(
+                "[Diary] image request failed trace_id=%s attempt=%s/4 endpoint=%s http_status=%s duration_ms=%s error_type=%s will_retry=%s error=%s",
+                image_trace_id, attempt_number,
+                "edits" if reference_bytes else "generations",
+                int(getattr(error_response, "status_code", 0) or 0),
+                int((time.monotonic() - attempt_started_at) * 1000),
+                type(error).__name__, attempt < 3, str(error)[:300],
+            )
     raise last_error or RuntimeError("image generation failed")
