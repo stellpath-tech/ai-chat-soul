@@ -1152,6 +1152,7 @@ class WebChannel(ChatChannel):
             '/api/admin/complaints', 'ComplaintAdminListHandler',
             '/api/admin/complaints/comment', 'ComplaintAdminCommentHandler',
             '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
+            '/api/admin/diary/retry', 'DiaryDateRetryHandler',
             '/api/app/version', 'AppVersionHandler',
             '/api/push/register', 'UserPushDeviceRegisterHandler',
             '/api/push/unregister', 'UserPushDeviceUnregisterHandler',
@@ -1829,6 +1830,34 @@ class DiaryHandler:
         except Exception as e:
             logger.exception("DiaryHandler POST error: %s", e)
             event_log.log_exception("diary_generate_failed", e, endpoint="/api/diary")
+            return _api_response(False, "Server error", None)
+
+
+class DiaryDateRetryHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            body = json.loads(web.data() or b"{}")
+            target_date = str(body.get("targetDate") or "").strip()
+            if not target_date:
+                return _api_response(False, "targetDate is required", None)
+            from channel.web.diary.worker import trigger_diary_date_retry
+            result = trigger_diary_date_retry(target_date)
+            web.ctx.status = '202 Accepted' if result.get("started") else '200 OK'
+            return _api_response(True, "Accepted" if result.get("started") else "Already running", result)
+        except json.JSONDecodeError:
+            return _api_response(False, "invalid JSON body", None)
+        except (ValueError, TypeError):
+            return _api_response(False, "Invalid targetDate", None)
+        except Exception as e:
+            logger.exception("DiaryDateRetryHandler error: %s", e)
+            event_log.log_exception(
+                "diary_date_retry_failed", e, endpoint="/api/admin/diary/retry",
+            )
             return _api_response(False, "Server error", None)
 
 
