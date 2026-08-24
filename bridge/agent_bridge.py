@@ -1040,8 +1040,19 @@ class AgentBridge:
                                 _tm_user_msgs.append(
                                     " ".join(p.get("text", "") for p in _c if isinstance(p, dict) and p.get("type") == "text")
                                 )
+                    _tm_assistant_reply = ""
+                    for _m in reversed(agent.messages[-10:]):
+                        if _m.get("role") == "assistant":
+                            _c = _m.get("content", "")
+                            if isinstance(_c, str):
+                                _tm_assistant_reply = _c
+                            elif isinstance(_c, list):
+                                _tm_assistant_reply = " ".join(
+                                    p.get("text", "") for p in _c if isinstance(p, dict) and p.get("type") == "text"
+                                )
+                            break
                     if _tm_user_msgs:
-                        fire_extract(_tm_workspace, session_id, session_id, _tm_user_msgs, _tm_api_key, _tm_api_base, _tm_model)
+                        fire_extract(_tm_workspace, session_id, session_id, _tm_user_msgs, _tm_api_key, _tm_api_base, _tm_model, _tm_assistant_reply)
                 except Exception as _tme:
                     logger.warning(f"[ThingMemory] fire_extract error: {_tme}")
 

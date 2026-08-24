@@ -112,8 +112,10 @@ BEAR_INTENT_PATTERN = re.compile(
     r"|你就叫|以后就叫你|以后你是|以后你叫|以后你就"
 )
 
-# 确定性守卫：回复含拒绝语义时，拒绝优先于接受
-_REFUSE_PATTERN = re.compile(r"不叫|不喊|不要|不行|拒绝|换个|换一个|不好|不愿意|不想叫|别叫|别再|不同意|才不要|哪有人叫|不喜欢|不爱|不想|不要嘛")
+# 确定性守卫：仅匹配「针对名字/称呼」的拒绝短语，避免「心情不好」等日常用语误杀
+_REFUSE_PATTERN = re.compile(
+    r"不想叫|不愿意叫|不同意叫|名字不好|不好听|换个名字|换一个名字|才不要这个|哪有人叫"
+)
 # 回复含明确确认语义
 _CONFIRM_PATTERN = re.compile(r"好|行|可以|没问题|记住|记得|就叫|是呀|嗯|当然|ok|OK|好的|就这样|定啦|定咯")
 
@@ -257,7 +259,7 @@ def _validate_rename_result(result: Optional[str], model_reply: str) -> Optional
     if not result or not isinstance(model_reply, str) or not model_reply.strip():
         return None
     if result == "denied":
-        return "denied" if _REFUSE_PATTERN.search(model_reply) else None
+        return "denied"  # 以 LLM 语义为准：模型明确拒绝即采信
     if result in ("user", "bear"):
         if _REFUSE_PATTERN.search(model_reply):
             return "denied"
