@@ -55,11 +55,12 @@ def fire_extract(
     api_key: str,
     api_base: str,
     model: str,
+    assistant_reply: str = "",
 ) -> None:
     """Launch background extraction (fire-and-forget)."""
     threading.Thread(
         target=_extract_worker,
-        args=(workspace_root, user_id, session_id, user_messages, api_key, api_base, model),
+        args=(workspace_root, user_id, session_id, user_messages, api_key, api_base, model, assistant_reply),
         daemon=True,
     ).start()
 
@@ -72,6 +73,7 @@ def _extract_worker(
     api_key: str,
     api_base: str,
     model: str,
+    assistant_reply: str = "",
 ) -> None:
     try:
         msgs_to_extract = [m for m in user_messages if isinstance(m, str) and m.strip()]
@@ -124,6 +126,21 @@ def _extract_worker(
                 add_memory(workspace_root, user_id, session_id, mem, source_text=src)
                 saved += 1
         logger.info(f"[ThingMemory] user={user_id} saved={saved}")
+
+        # 改名落库前走模型判断：不明确拒绝才落库（以 LLM 语义为准）
+        if (nickname or bearnickname) and assistant_reply:
+            try:
+                from agent.memory.thing_memory.extractor import judge_rename
+                _judge_request = msgs_to_extract[-1] if msgs_to_extract else ""
+                _judge_result, _ = judge_rename(
+                    _judge_request, assistant_reply, current_nick, current_bear,
+                    api_key, api_base, model,
+                )
+                if _judge_result == "denied":
+                    logger.info(f"[ThingMemory] rename denied by model judge: user={user_id} nickname={nickname!r} bearnickname={bearnickname!r}")
+                    return
+            except Exception as _je:
+                logger.warning(f"[ThingMemory] rename judge failed, will apply: {_je}")
 
         # 写入昵称（文件缓存 + soul.db.user 表，旧昵称归档到 used_nickname）
         if nickname:
