@@ -42,6 +42,8 @@ const I18N = {
         logs_title: '日志', logs_desc: '实时日志输出 (run.log)',
         logs_live: '实时', logs_coming_msg: '日志流即将在此提供。将连接 run.log 实现类似 tail -f 的实时输出。',
         error_send: '发送失败，请稍后再试。', error_timeout: '请求超时，请再试一次。',
+        quote_action: '引用', quote_tooltip: '引用这条消息', quote_cancel: '取消引用',
+        quote_role_user: '用户', quote_role_assistant: 'AI',
     },
     en: {
         console: 'Console',
@@ -74,6 +76,8 @@ const I18N = {
         logs_title: 'Logs', logs_desc: 'Real-time log output (run.log)',
         logs_live: 'Live', logs_coming_msg: 'Log streaming will be available here. Connects to run.log for real-time output similar to tail -f.',
         error_send: 'Failed to send. Please try again.', error_timeout: 'Request timeout. Please try again.',
+        quote_action: 'Quote', quote_tooltip: 'Quote this message', quote_cancel: 'Cancel quote',
+        quote_role_user: 'User', quote_role_assistant: 'AI',
     }
 };
 
@@ -92,6 +96,9 @@ function applyI18n() {
     });
     document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
         el.placeholder = t(el.dataset['i18nPlaceholder']);
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach(el => {
+        el.title = t(el.dataset['i18nTitle']);
     });
     document.getElementById('lang-label').textContent = currentLang === 'zh' ? 'EN' : '中文';
 }
@@ -263,6 +270,72 @@ const chatInput = document.getElementById('chat-input');
 const sendBtn = document.getElementById('send-btn');
 const messagesDiv = document.getElementById('chat-messages');
 
+// =====================================================================
+// Message quoting
+// =====================================================================
+const QUOTE_PREVIEW_CHARS = 60;
+let pendingQuote = null;   // { role, content }
+
+function quoteRoleLabel(role) {
+    return t(role === 'user' ? 'quote_role_user' : 'quote_role_assistant');
+}
+
+function quotePreview(content) {
+    const oneLine = String(content || '').replace(/\s+/g, ' ').trim();
+    return oneLine.length > QUOTE_PREVIEW_CHARS
+        ? oneLine.slice(0, QUOTE_PREVIEW_CHARS) + '…'
+        : oneLine;
+}
+
+function renderQuoteBar() {
+    const bar = document.getElementById('quote-bar');
+    if (!bar) return;
+    if (!pendingQuote) {
+        bar.hidden = true;
+        return;
+    }
+    document.getElementById('quote-bar-role').textContent = quoteRoleLabel(pendingQuote.role) + '：';
+    document.getElementById('quote-bar-text').textContent = quotePreview(pendingQuote.content);
+    bar.hidden = false;
+}
+
+function setQuote(role, content) {
+    const text = String(content || '').trim();
+    if (!text) return;
+    pendingQuote = { role: role === 'user' ? 'user' : 'assistant', content: text };
+    renderQuoteBar();
+    chatInput.focus();
+}
+
+function clearQuote() {
+    pendingQuote = null;
+    renderQuoteBar();
+}
+
+// The quote button lives on every rendered message; delegate so messages added
+// later (SSE, polling, new chat) need no extra wiring.
+messagesDiv.addEventListener('click', function(e) {
+    const btn = e.target.closest('.quote-btn');
+    if (!btn) return;
+    const host = btn.closest('[data-quote-role]');
+    if (!host) return;
+    setQuote(host.dataset.quoteRole, host.dataset.quoteText || '');
+});
+
+function quoteButtonHtml() {
+    return `<button type="button" class="quote-btn" data-i18n-title="quote_tooltip" title="${escapeHtml(t('quote_tooltip'))}">
+                <i class="fas fa-quote-left"></i><span>${escapeHtml(t('quote_action'))}</span>
+            </button>`;
+}
+
+function quoteBadgeHtml(quote) {
+    if (!quote || !quote.content) return '';
+    return `<div class="quote-badge">
+                <span class="quote-badge-role">${escapeHtml(quoteRoleLabel(quote.role))}：</span>
+                <span class="quote-badge-text">${escapeHtml(quotePreview(quote.content))}</span>
+            </div>`;
+}
+
 chatInput.addEventListener('compositionstart', () => { isComposing = true; });
 chatInput.addEventListener('compositionend', () => { isComposing = false; });
 
@@ -308,7 +381,8 @@ function sendMessage() {
     if (ws) ws.remove();
 
     const timestamp = new Date();
-    addUserMessage(text, timestamp);
+    const quote = pendingQuote;
+    addUserMessage(text, timestamp, quote);
 
     const loadingEl = addLoadingIndicator();
 
@@ -316,11 +390,18 @@ function sendMessage() {
     chatInput.style.height = '42px';
     chatInput.style.overflowY = 'hidden';
     sendBtn.disabled = true;
+    clearQuote();
 
     fetch('/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, message: text, stream: true, timestamp: timestamp.toISOString() })
+        body: JSON.stringify({
+            session_id: sessionId,
+            message: text,
+            stream: true,
+            timestamp: timestamp.toISOString(),
+            ...(quote ? { quote } : {}),
+        })
     })
     .then(r => r.json())
     .then(data => {
@@ -358,6 +439,9 @@ function startSSE(requestId, loadingEl, timestamp) {
         botEl = document.createElement('div');
         botEl.className = 'flex gap-3 px-4 sm:px-6 py-3';
         botEl.dataset.requestId = requestId;
+        // Filled in on `done`; until then there is no final text worth quoting.
+        botEl.dataset.quoteRole = 'assistant';
+        botEl.dataset.quoteText = '';
         botEl.innerHTML = `
             <img src="assets/logo.jpg" alt="CowAgent" class="w-8 h-8 rounded-lg flex-shrink-0">
             <div class="min-w-0 flex-1 max-w-[85%]">
@@ -365,7 +449,10 @@ function startSSE(requestId, loadingEl, timestamp) {
                     <div class="agent-steps"></div>
                     <div class="answer-content sse-streaming"></div>
                 </div>
-                <div class="text-xs text-slate-400 dark:text-slate-500 mt-1.5">${formatTime(timestamp)}</div>
+                <div class="msg-meta text-xs text-slate-400 dark:text-slate-500 mt-1.5">
+                    <span>${formatTime(timestamp)}</span>
+                    ${quoteButtonHtml()}
+                </div>
             </div>
         `;
         messagesDiv.appendChild(botEl);
@@ -473,6 +560,7 @@ function startSSE(requestId, loadingEl, timestamp) {
             } else if (botEl) {
                 contentEl.classList.remove('sse-streaming');
                 if (finalText) contentEl.innerHTML = renderMarkdown(finalText);
+                botEl.dataset.quoteText = finalText || '';
                 applyHighlighting(botEl);
             }
             scrollChatToBottom();
@@ -494,6 +582,7 @@ function startSSE(requestId, loadingEl, timestamp) {
         } else if (accumulatedText) {
             contentEl.classList.remove('sse-streaming');
             contentEl.innerHTML = renderMarkdown(accumulatedText);
+            botEl.dataset.quoteText = accumulatedText;
             applyHighlighting(botEl);
         }
     };
@@ -530,15 +619,21 @@ function startPolling() {
     poll();
 }
 
-function addUserMessage(content, timestamp) {
+function addUserMessage(content, timestamp, quote) {
     const el = document.createElement('div');
     el.className = 'flex justify-end px-4 sm:px-6 py-3';
+    el.dataset.quoteRole = 'user';
+    el.dataset.quoteText = content;
     el.innerHTML = `
         <div class="max-w-[75%] sm:max-w-[60%]">
             <div class="bg-primary-400 text-white rounded-2xl px-4 py-2.5 text-sm leading-relaxed msg-content">
+                ${quoteBadgeHtml(quote)}
                 ${renderMarkdown(content)}
             </div>
-            <div class="text-xs text-slate-400 dark:text-slate-500 mt-1.5 text-right">${formatTime(timestamp)}</div>
+            <div class="msg-meta justify-end text-xs text-slate-400 dark:text-slate-500 mt-1.5">
+                ${quoteButtonHtml()}
+                <span>${formatTime(timestamp)}</span>
+            </div>
         </div>
     `;
     messagesDiv.appendChild(el);
@@ -549,13 +644,18 @@ function addBotMessage(content, timestamp, requestId) {
     const el = document.createElement('div');
     el.className = 'flex gap-3 px-4 sm:px-6 py-3';
     if (requestId) el.dataset.requestId = requestId;
+    el.dataset.quoteRole = 'assistant';
+    el.dataset.quoteText = content;
     el.innerHTML = `
         <img src="assets/logo.jpg" alt="CowAgent" class="w-8 h-8 rounded-lg flex-shrink-0">
         <div class="min-w-0 flex-1 max-w-[85%]">
             <div class="bg-white dark:bg-[#1A1A1A] border border-slate-200 dark:border-white/10 rounded-2xl px-4 py-3 text-sm leading-relaxed msg-content text-slate-700 dark:text-slate-200">
                 ${renderMarkdown(content)}
             </div>
-            <div class="text-xs text-slate-400 dark:text-slate-500 mt-1.5">${formatTime(timestamp)}</div>
+            <div class="msg-meta text-xs text-slate-400 dark:text-slate-500 mt-1.5">
+                <span>${formatTime(timestamp)}</span>
+                ${quoteButtonHtml()}
+            </div>
         </div>
     `;
     messagesDiv.appendChild(el);
@@ -589,6 +689,7 @@ function newChat() {
     sessionId = generateSessionId();
     isPolling = false;
     loadingContainers = {};
+    clearQuote();
     messagesDiv.innerHTML = '';
     const ws = document.createElement('div');
     ws.id = 'welcome-screen';

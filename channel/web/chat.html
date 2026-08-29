@@ -244,6 +244,17 @@
 
                     <!-- Chat Input -->
                     <div class="flex-shrink-0 border-t border-slate-200 dark:border-white/10 bg-white dark:bg-[#1A1A1A] px-4 py-3">
+                        <!-- Pending quote bubble (hidden until a message is quoted) -->
+                        <div id="quote-bar" class="max-w-3xl mx-auto quote-bar" hidden>
+                            <div class="quote-bar-body">
+                                <span class="quote-bar-role" id="quote-bar-role"></span>
+                                <span class="quote-bar-text" id="quote-bar-text"></span>
+                            </div>
+                            <button type="button" class="quote-bar-cancel" id="quote-bar-cancel"
+                                    data-i18n-title="quote_cancel" title="取消引用" onclick="clearQuote()">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
                         <div class="max-w-3xl mx-auto flex items-center gap-2">
                             <button id="new-chat-btn" class="flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-lg
                                                              text-slate-400 hover:text-primary-500 hover:bg-primary-50 dark:hover:bg-primary-900/20

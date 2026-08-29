@@ -166,6 +166,7 @@ def init_db():
           diary_summary TEXT NOT NULL DEFAULT '',
           source VARCHAR(32) NOT NULL DEFAULT 'APP',
           request_id VARCHAR(64) NOT NULL DEFAULT '',
+          quote TEXT NOT NULL DEFAULT '',
           created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -174,6 +175,7 @@ def init_db():
             "weather_text": "VARCHAR(255) NOT NULL DEFAULT ''",
             "diary_title": "VARCHAR(255) NOT NULL DEFAULT ''",
             "diary_summary": "TEXT NOT NULL DEFAULT ''",
+            "quote": "TEXT NOT NULL DEFAULT ''",
         })
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_chat_message_user_id_id ON user_chat_message(user_id, id)")
 
@@ -838,12 +840,14 @@ def append_chat_message(
     weather_text="",
     diary_title="",
     diary_summary="",
+    quote=None,
 ):
     content_text = content or ""
     image_url_text = image_url or ""
     weather_text = weather_text or ""
     diary_title = diary_title or ""
     diary_summary = diary_summary or ""
+    quote_text = json.dumps(quote, ensure_ascii=False) if quote else ""
     has_card_payload = message_type == "card" and (weather_text or diary_title or diary_summary)
     if not user_id or user_id == -1 or (not content_text and not image_url_text and not has_card_payload):
         return None
@@ -852,8 +856,8 @@ def append_chat_message(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO user_chat_message
-            (user_id, session_id, role, content, image_url, message_type, weather_text, diary_title, diary_summary, source, request_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, session_id, role, content, image_url, message_type, weather_text, diary_title, diary_summary, source, request_id, quote, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id,
             session_id or "",
@@ -866,6 +870,7 @@ def append_chat_message(
             diary_summary,
             source or "APP",
             request_id or "",
+            quote_text,
             now_str,
         ))
         message_id = cursor.lastrowid
@@ -924,7 +929,7 @@ def list_chat_messages(user_id, offset=None, limit=50):
     params.append(safe_limit)
     with closing(get_db()) as conn:
         rows = conn.execute(f"""
-            SELECT id, role, content, image_url, message_type, weather_text, diary_title, diary_summary, source, request_id, created_at
+            SELECT id, role, content, image_url, message_type, weather_text, diary_title, diary_summary, source, request_id, quote, created_at
             FROM user_chat_message
             WHERE {where}
             ORDER BY id DESC
@@ -953,6 +958,7 @@ def list_chat_messages(user_id, offset=None, limit=50):
                     "diarySummary": msg["diary_summary"] or "",
                     "source": msg["source"],
                     "requestId": msg["request_id"],
+                    "quote": _loads_quote(msg["quote"]),
                     "createdAt": msg["created_at"],
                 }
                 for msg in messages
@@ -1420,6 +1426,16 @@ def _loads_json_array(value):
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, str)]
+
+def _loads_quote(value):
+    """Decode the stored quote JSON; None for rows written before the column existed."""
+    if not value:
+        return None
+    try:
+        data = json.loads(value)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and data.get("content") else None
 
 def _datetime_str_to_ms(value):
     if not value:

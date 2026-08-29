@@ -216,6 +216,7 @@ class CloudClient(LinkAIClient):
         query = payload.get("query", "")
         session_id = payload.get("session_id", "cloud_console")
         parent_reply_mode = payload.get("parent_reply_mode")
+        quote = payload.get("quote")
         logger.info(f"[CloudClient] on_chat: session={session_id}, query={query[:80]}")
 
         svc = self.chat_service
@@ -227,6 +228,7 @@ class CloudClient(LinkAIClient):
             session_id=session_id,
             send_chunk_fn=send_chunk_fn,
             parent_reply_mode=parent_reply_mode,
+            quote=quote,
         )
 
     # ------------------------------------------------------------------
