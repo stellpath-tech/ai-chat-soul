@@ -937,6 +937,17 @@ class AgentBridge:
             else:
                 user_message = query
 
+            # 引用注入：把被引用的历史消息前置到本轮 user message，保证模型一定看到。
+            # 放在红线过滤之前，引用内容同样要过一遍输入过滤。
+            quote = context.get("quote") if context else None
+            if quote and quote.get("content"):
+                from agent.chat.quote import compose_with_quote
+                user_message = compose_with_quote(user_message, quote)
+                logger.info(
+                    f"[AgentBridge] Quote injected: role={quote.get('role')} "
+                    f"len={len(quote.get('content', ''))}"
+                )
+
             # Input redline filter
             if _conf().get("redline_input_filter_enabled", True):
                 from agent.utils.redline import filter_input
@@ -961,6 +972,11 @@ class AgentBridge:
                         logger.debug(f"[ThingMemory] injected {len(_mem_block)} chars for session={session_id}")
                 except Exception as _tme:
                     logger.warning(f"[ThingMemory] get_memory_block error: {_tme}")
+
+            # 本轮带引用时才追加【引用处理】规则，避免污染普通对话的 system prompt。
+            if quote and quote.get("content"):
+                from agent.chat.quote import append_quote_instruction
+                append_system = append_quote_instruction(append_system, quote)
 
             # Keep this after all other per-turn blocks so the selected reply
             # mode is the final sentence in the system prompt.
