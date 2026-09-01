@@ -134,6 +134,15 @@ class Bridge(object):
             self._agent_bridge = AgentBridge(self)
         return self._agent_bridge
 
+    def peek_agent_bridge(self):
+        """Return the agent bridge only if it already exists.
+
+        For callers that want to poke at live per-session state: if the bridge
+        was never built there is no state to poke at, and building one here
+        would be an expensive no-op.
+        """
+        return self._agent_bridge
+
     def fetch_agent_reply(self, query: str, context: Context = None,
                           on_event=None, clear_history: bool = False) -> Reply:
         """

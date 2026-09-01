@@ -638,6 +638,7 @@ class WebChannel(ChatChannel):
             
             # 优先使用 token 解析出的 user_id 作为 session
             session_id = None
+            user = None
             user_id = -1
             user_group = -1
             phone_number = ""
@@ -684,6 +685,20 @@ class WebChannel(ChatChannel):
             timezone     = json_data.get('timezone')
             sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传
             db.record_user_timezone_async(user_id, timezone)
+
+            # 跨过用户本地零点、且静默满 2 小时，就把对话上下文切成新的一天。
+            # 只清对话，session_id / 长期记忆 / 昵称都保留。
+            try:
+                from agent.chat.session_rotate import maybe_rotate, resolve_timezone
+                from config import conf as _rot_conf
+                from common.utils import expand_path as _rot_expand
+                maybe_rotate(
+                    _rot_expand(_rot_conf().get("agent_workspace", "~/cow")),
+                    session_id,
+                    resolve_timezone(timezone, user),
+                )
+            except Exception as _sre:
+                logger.warning(f"[SessionRotate] skipped for {session_id}: {_sre}")
 
             request_id = self._generate_request_id()
             self.request_to_session[request_id] = session_id

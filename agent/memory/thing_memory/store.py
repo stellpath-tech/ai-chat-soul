@@ -50,16 +50,26 @@ def _init(conn: sqlite3.Connection) -> None:
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ca_user ON conversation_archive(user_id, archived_at)",
         """CREATE TABLE IF NOT EXISTS current_setting (
-            user_id      TEXT PRIMARY KEY,
-            conversation TEXT,
-            nickname     TEXT,
-            memory       TEXT,
-            updated_at   TEXT
+            user_id           TEXT PRIMARY KEY,
+            conversation      TEXT,
+            nickname          TEXT,
+            memory            TEXT,
+            last_user_msg_at  TEXT,
+            updated_at        TEXT
         )""",
     ]
     for stmt in stmts:
         conn.execute(stmt)
+    _ensure_columns(conn, "current_setting", {"last_user_msg_at": "TEXT"})
     conn.commit()
+
+
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict) -> None:
+    """Add missing columns to an existing table (SQLite has no ADD COLUMN IF NOT EXISTS)."""
+    have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, ddl in columns.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 # ── In-memory cache ───────────────────────────────────────────────────────────
