@@ -2,7 +2,8 @@
 User session disk cache.
 
 Each active user gets a JSON file under {workspace}/cache/{user_id}.json.
-The file holds their current conversation, nickname, and memory snapshot.
+The file holds their current conversation, nickname, memory snapshot, and the
+timestamp of their last message.
 
 Lifecycle:
   touch(workspace, uid)          - called on ANY request; cold-loads from DB if needed
@@ -69,7 +70,8 @@ def _load_from_db(workspace_root: str, user_id: str) -> dict:
         try:
             with _conn(path) as conn:
                 row = conn.execute(
-                    "SELECT conversation, nickname, memory FROM current_setting WHERE user_id=?",
+                    "SELECT conversation, nickname, memory, last_user_msg_at "
+                    "FROM current_setting WHERE user_id=?",
                     (user_id,),
                 ).fetchone()
             if row:
@@ -78,11 +80,19 @@ def _load_from_db(workspace_root: str, user_id: str) -> dict:
                     "conversation": json.loads(row["conversation"] or "[]"),
                     "nickname": row["nickname"],
                     "memory": json.loads(row["memory"] or "[]"),
+                    "last_user_msg_at": row["last_user_msg_at"],
                     "last_active": time.time(),
                 }
         except Exception:
             pass
-    return {"user_id": user_id, "conversation": [], "nickname": None, "memory": [], "last_active": time.time()}
+    return {
+        "user_id": user_id,
+        "conversation": [],
+        "nickname": None,
+        "memory": [],
+        "last_user_msg_at": None,
+        "last_active": time.time(),
+    }
 
 
 def _save_to_db(workspace_root: str, data: dict) -> None:
@@ -94,15 +104,18 @@ def _save_to_db(workspace_root: str, data: dict) -> None:
     conv = json.dumps(data.get("conversation", []), ensure_ascii=False)
     mem = json.dumps(data.get("memory", []), ensure_ascii=False)
     nick = data.get("nickname")
+    last_msg = data.get("last_user_msg_at")
     path = db_path(workspace_root)
     try:
         with _conn(path) as conn:
             conn.execute(
-                "INSERT INTO current_setting (user_id, conversation, nickname, memory, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                "INSERT INTO current_setting "
+                "(user_id, conversation, nickname, memory, last_user_msg_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
                 "conversation=excluded.conversation, nickname=excluded.nickname, "
-                "memory=excluded.memory, updated_at=excluded.updated_at",
-                (uid, conv, nick, mem, now),
+                "memory=excluded.memory, last_user_msg_at=excluded.last_user_msg_at, "
+                "updated_at=excluded.updated_at",
+                (uid, conv, nick, mem, last_msg, now),
             )
             conn.commit()
     except Exception as e:
@@ -146,6 +159,19 @@ def update_memory(workspace_root: str, user_id: str, memories: list) -> None:
     path = _file_path(workspace_root, user_id)
     data = _read(path) or {"user_id": user_id, "conversation": [], "nickname": None}
     data["memory"] = memories
+    data["last_active"] = time.time()
+    _write(path, data)
+
+
+def update_last_user_msg_at(workspace_root: str, user_id: str, stamp: str) -> None:
+    """Record when this user last sent a message (ISO-8601 UTC).
+
+    Kept separate from last_active, which any request refreshes — the rotation
+    rule only cares about the user actually speaking.
+    """
+    path = _file_path(workspace_root, user_id)
+    data = _read(path) or {"user_id": user_id, "conversation": [], "nickname": None, "memory": []}
+    data["last_user_msg_at"] = stamp
     data["last_active"] = time.time()
     _write(path, data)
 

@@ -582,6 +582,23 @@ class AgentBridge:
         self._session_last_active[session_id] = time.time()
         return self.agents[session_id]
 
+    def reset_conversation(self, session_id: str) -> int:
+        """Drop the in-memory dialogue for a session, keeping the agent warm.
+
+        The on-disk caches are cleared by the caller; this is the piece that has
+        to happen in-process, because a live Agent would otherwise write its
+        stale messages straight back at the end of the next turn.
+
+        Returns the number of messages dropped.
+        """
+        agent = self.agents.get(session_id)
+        if agent is None:
+            return 0
+        with agent.messages_lock:
+            dropped = len(agent.messages)
+            agent.messages = []
+        return dropped
+
     def _reply_change_settings(self, agent, session_id, sentence, on_event, holder) -> Reply:
         """change_settings 特殊流程（settings 页改名）。
 
