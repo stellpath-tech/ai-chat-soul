@@ -9,6 +9,7 @@ except Exception:
 
 
 SUPPORTED_PUSH_PLATFORMS = {"ios", "android", "harmonyos"}
+SUPPORTED_PUSH_TYPES = {"greeting", "weather", "diary", "recall"}
 
 
 class PushDeviceRequestError(ValueError):
@@ -16,6 +17,18 @@ class PushDeviceRequestError(ValueError):
 
 
 class PushTestRequestError(ValueError):
+    pass
+
+
+class UserActivityRequestError(ValueError):
+    pass
+
+
+class PushContentRequestError(ValueError):
+    pass
+
+
+class PushContentImageRequestError(ValueError):
     pass
 
 
@@ -43,6 +56,110 @@ def _optional_text(payload, field_name, max_length):
     value = value.strip()
     if len(value) > max_length:
         raise PushDeviceRequestError("{} is too long".format(field_name))
+    return value
+
+
+@dataclass(frozen=True)
+class UserActivityReport:
+    timezone_profile: dict
+    notification_enabled: object
+    location: object
+
+    @classmethod
+    def from_request_body(cls, payload):
+        if not isinstance(payload, dict):
+            raise UserActivityRequestError("request body must be an object")
+        timezone_payload = payload.get("timezone")
+        if not isinstance(timezone_payload, dict):
+            raise UserActivityRequestError("timezone is required")
+        timezone_name = str(timezone_payload.get("tz_iana") or "").strip()
+        if not timezone_name or len(timezone_name) > 255:
+            raise UserActivityRequestError("invalid timezone.tz_iana")
+        try:
+            timezone_offset = int(timezone_payload.get("tz_offset_min"))
+        except (TypeError, ValueError):
+            raise UserActivityRequestError("invalid timezone.tz_offset_min")
+        if timezone_offset < -720 or timezone_offset > 840:
+            raise UserActivityRequestError("invalid timezone.tz_offset_min")
+
+        notification_enabled = payload.get("notificationEnabled")
+        if notification_enabled is not None and not isinstance(notification_enabled, bool):
+            raise UserActivityRequestError("notificationEnabled must be a boolean")
+
+        location_payload = payload.get("location")
+        location = None
+        if location_payload is not None:
+            if not isinstance(location_payload, dict):
+                raise UserActivityRequestError("location must be an object")
+            try:
+                latitude = float(location_payload.get("lat"))
+                longitude = float(location_payload.get("lon"))
+            except (TypeError, ValueError):
+                raise UserActivityRequestError("invalid location")
+            if latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180:
+                raise UserActivityRequestError("invalid location")
+            location = {"lat": latitude, "lon": longitude}
+
+        return cls(
+            timezone_profile={
+                "tz_iana": timezone_name,
+                "tz_offset_min": timezone_offset,
+            },
+            notification_enabled=notification_enabled,
+            location=location,
+        )
+
+
+@dataclass(frozen=True)
+class PushContentMutation:
+    content_no: str
+    push_type: str
+    delivery_scene: str
+    title: str
+    body: str
+    enabled: bool
+
+    @classmethod
+    def from_request_body(cls, payload):
+        if not isinstance(payload, dict):
+            raise PushContentRequestError("request body must be an object")
+        content_no = _content_required_text(payload, "contentNo", 64)
+        push_type = _content_required_text(payload, "pushType", 16).lower()
+        if push_type not in SUPPORTED_PUSH_TYPES:
+            raise PushContentRequestError("invalid pushType")
+        delivery_scene = _content_required_text(payload, "deliveryScene", 64).upper()
+        if not delivery_scene.startswith(push_type.upper() + "_"):
+            raise PushContentRequestError("deliveryScene does not match pushType")
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise PushContentRequestError("enabled must be a boolean")
+        return cls(
+            content_no=content_no,
+            push_type=push_type,
+            delivery_scene=delivery_scene,
+            title=_content_required_text(payload, "title", 255),
+            body=_content_required_text(payload, "body", 2000),
+            enabled=enabled,
+        )
+
+    def as_database_fields(self):
+        return {
+            "content_no": self.content_no,
+            "push_type": self.push_type,
+            "delivery_scene": self.delivery_scene,
+            "title": self.title,
+            "body": self.body,
+            "enabled": self.enabled,
+        }
+
+
+def _content_required_text(payload, field_name, max_length):
+    value = payload.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise PushContentRequestError("{} is required".format(field_name))
+    value = value.strip()
+    if len(value) > max_length:
+        raise PushContentRequestError("{} is too long".format(field_name))
     return value
 
 
@@ -128,6 +245,62 @@ class PushTestNotification:
             "Classification": 0,
             "OfflineStorageTime": 86400,
         }
+
+
+@dataclass(frozen=True)
+class ProactivePushNotification:
+    push_id: str
+    push_type: str
+    title: str
+    body: str
+    card: dict
+
+    @classmethod
+    def from_task(cls, task):
+        try:
+            card = json.loads(task.get("card_json") or "{}")
+        except (TypeError, ValueError) as error:
+            raise ValueError("invalid proactive push card") from error
+        if not isinstance(card, dict):
+            raise ValueError("invalid proactive push card")
+        push_id = str(task.get("push_id") or card.get("pushId") or "").strip()
+        push_type = str(task.get("push_type") or card.get("type") or "").strip()
+        title = str(card.get("title") or "").strip()
+        body = str(card.get("body") or "").strip()
+        if not push_id or push_type not in SUPPORTED_PUSH_TYPES or not title or not body:
+            raise ValueError("incomplete proactive push card")
+        card["pushId"] = push_id
+        card["type"] = push_type
+        return cls(push_id, push_type, title, body, card)
+
+    def to_tencent_request_body(self, sender, receiver, message_random):
+        extension_payload = {
+            "type": self.push_type,
+            "pushId": self.push_id,
+        }
+        if self.push_type == "diary":
+            if self.card.get("diaryDate"):
+                extension_payload["diaryDate"] = self.card["diaryDate"]
+            if self.card.get("ts") is not None:
+                extension_payload["ts"] = self.card["ts"]
+        return {
+            "From_Account": sender,
+            "To_Account": [receiver],
+            "MsgRandom": message_random,
+            "OfflinePushInfo": {
+                "PushFlag": 0,
+                "Title": self.title,
+                "Desc": self.body,
+                "Ext": _compact_json(extension_payload),
+            },
+            "DataId": self.push_id,
+            "TaskName": self.push_type,
+            "Classification": 0,
+            "OfflineStorageTime": 86400,
+        }
+
+def _compact_json(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 @dataclass(frozen=True)

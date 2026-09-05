@@ -5,6 +5,7 @@ import json
 import uuid
 import base64
 import tempfile
+import sqlite3
 from collections import deque
 from queue import Queue, Empty
 from bridge.context import *
@@ -26,10 +27,20 @@ from channel.web.push.service import (
     PushTestDeliveryError,
     PushTestDeviceNotRegisteredError,
     PushTestRequestError,
+    get_authenticated_user_push_card,
     register_authenticated_user_push_device,
     send_authenticated_user_push_test,
     unregister_authenticated_user_push_device,
 )
+from channel.web.push.contracts import (
+    PushContentImageRequestError,
+    PushContentMutation,
+    PushContentRequestError,
+    UserActivityReport,
+    UserActivityRequestError,
+)
+from channel.web.push import assets as push_assets
+from channel.web.push import repository as push_repository
 from channel.web.diary.styles import is_valid_diary_image_style
 
 try:
@@ -88,6 +99,17 @@ def _require_admin():
     return _api_response(False, "unauthorized", None)
 
 
+def _optional_boolean_query(value):
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text in ("true", "1"):
+        return True
+    if text in ("false", "0"):
+        return False
+    raise ValueError("invalid enabled")
+
+
 
 class WebMessage(ChatMessage):
     def __init__(
@@ -138,6 +160,7 @@ class WebChannel(ChatChannel):
         self._pet_event_max = 50
         self._account_cleanup_started = False
         self._diary_worker_started = False
+        self._proactive_push_worker_started = False
 
 
     def _generate_msg_id(self):
@@ -256,6 +279,11 @@ class WebChannel(ChatChannel):
         try:
             self.produce(context)
         except Exception as e:
+            if context.get("proactive_conversation_tracked"):
+                from channel.web.push.conversation import conversation_activity
+                conversation_activity.finish(
+                    context.get("user_id"), context.get("request_id")
+                )
             event_log.log_exception(
                 "produce_failed",
                 e,
@@ -268,6 +296,13 @@ class WebChannel(ChatChannel):
                 source=context.get("source", ""),
             )
             logger.exception(f"[WebChannel] produce failed for request {request_id}: {e}")
+
+    def _track_proactive_conversation(self, context):
+        from channel.web.push.conversation import conversation_activity
+        tracked = conversation_activity.start(
+            context.get("user_id"), context.get("request_id")
+        )
+        context["proactive_conversation_tracked"] = tracked
 
     def _make_sse_callback(
         self,
@@ -794,6 +829,7 @@ class WebChannel(ChatChannel):
                             weather_text=sensor_label,
                         )
 
+                self._track_proactive_conversation(context)
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({
                     "status": "success",
@@ -880,6 +916,7 @@ class WebChannel(ChatChannel):
                         weather_text=sensor_label,
                     )
 
+                self._track_proactive_conversation(context)
                 threading.Thread(target=self._produce_with_logging, args=(context,)).start()
                 return json.dumps({
                     "status": "success",
@@ -958,6 +995,7 @@ class WebChannel(ChatChannel):
                     weather_text=sensor_label,
                 )
 
+            self._track_proactive_conversation(context)
             threading.Thread(target=self._produce_with_logging, args=(context,)).start()
 
             return json.dumps({
@@ -1105,6 +1143,7 @@ class WebChannel(ChatChannel):
         db.init_db()
         self._start_account_cleanup_thread()
         self._start_diary_worker()
+        self._start_proactive_push_worker()
 
         # 从磁盘恢复设备注册表
         self._load_device_registry()
@@ -1135,6 +1174,7 @@ class WebChannel(ChatChannel):
             '/stream', 'StreamHandler',
             '/chat', 'ChatHandler',
             '/complaints', 'ComplaintsPageHandler',
+            '/push-contents', 'PushContentsPageHandler',
             '/config', 'ConfigHandler',
             '/api/skills', 'SkillsHandler',
             '/api/scheduler', 'SchedulerHandler',
@@ -1146,17 +1186,23 @@ class WebChannel(ChatChannel):
             '/api/pet/event/send', 'PetEventSendHandler',
             '/api/auth/register', 'AuthRegisterHandler',
             '/api/user/profile', 'UserProfileHandler',
+            '/api/user/activity', 'UserActivityHandler',
             '/api/user/account', 'UserAccountHandler',
             '/api/feedback', 'FeedbackHandler',
             '/api/admin/complaints/auth', 'ComplaintAdminAuthHandler',
             '/api/admin/complaints', 'ComplaintAdminListHandler',
             '/api/admin/complaints/comment', 'ComplaintAdminCommentHandler',
             '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
+            '/api/admin/push-contents', 'PushContentCollectionHandler',
+            r'/api/admin/push-contents/(\d+)', 'PushContentItemHandler',
+            r'/api/admin/push-contents/(\d+)/images', 'PushContentImageCollectionHandler',
+            r'/api/admin/push-contents/(\d+)/images/(\d+)', 'PushContentImageItemHandler',
             '/api/admin/diary/retry', 'DiaryDateRetryHandler',
             '/api/app/version', 'AppVersionHandler',
             '/api/push/register', 'UserPushDeviceRegisterHandler',
             '/api/push/unregister', 'UserPushDeviceUnregisterHandler',
             '/api/push/test', 'PushTestHandler',
+            r'/api/push/(psh_[0-9a-f]{32})/card', 'PushCardHandler',
             '/api/chat/history', 'ChatHistoryHandler',
             '/api/diary', 'DiaryHandler',
             '/api/diary/image/style', 'DiaryImageStyleHandler',
@@ -1224,6 +1270,17 @@ class WebChannel(ChatChannel):
             logger.exception("[WebChannel] Failed to start diary worker: %s", e)
             event_log.log_exception("diary_worker_start_failed", e)
 
+    def _start_proactive_push_worker(self):
+        if self._proactive_push_worker_started:
+            return
+        self._proactive_push_worker_started = True
+        try:
+            from channel.web.push.worker import start_proactive_push_worker
+            start_proactive_push_worker()
+        except Exception as e:
+            logger.exception("[WebChannel] Failed to start proactive push worker: %s", e)
+            event_log.log_exception("proactive_push_worker_start_failed", e)
+
     def stop(self):
         if self._http_server:
             try:
@@ -1277,6 +1334,13 @@ class ChatHandler:
 class ComplaintsPageHandler:
     def GET(self):
         file_path = os.path.join(os.path.dirname(__file__), 'complaints.html')
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+
+class PushContentsPageHandler:
+    def GET(self):
+        file_path = os.path.join(os.path.dirname(__file__), 'push_contents.html')
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
 
@@ -1489,6 +1553,40 @@ class UserProfileHandler:
             return _api_response(False, "Server error", None)
 
 
+class UserActivityHandler:
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            request_body = json.loads(web.data() or b"{}")
+            report = UserActivityReport.from_request_body(request_body)
+            if not push_repository.update_user_activity(
+                user["id"],
+                report.timezone_profile,
+                notification_enabled=report.notification_enabled,
+                location=report.location,
+            ):
+                web.ctx.status = '404 Not Found'
+                return _api_response(False, "user not found", None)
+            return _api_response(True, "Success", None)
+        except json.JSONDecodeError:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, "invalid JSON body", None)
+        except UserActivityRequestError as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("UserActivityHandler error: %s", error)
+            event_log.log_exception(
+                "user_activity_failed", error, endpoint="/api/user/activity"
+            )
+            return _api_response(False, "Server error", None)
+
+
 class UserAccountHandler:
     def DELETE(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -1655,6 +1753,167 @@ class ComplaintAdminStatusHandler:
             return _api_response(False, "Server error", None)
 
 
+class PushContentCollectionHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            params = web.input(
+                pushType="", deliveryScene="", enabled="", keyword="",
+                limit=30, offset=0,
+            )
+            push_type = str(params.pushType or "").strip().lower()
+            if push_type and push_type not in ("greeting", "weather", "diary", "recall"):
+                web.ctx.status = '400 Bad Request'
+                return _api_response(False, "invalid pushType", None)
+            enabled = _optional_boolean_query(params.enabled)
+            result = push_assets.add_signed_urls_to_content_list(
+                push_repository.list_contents(
+                    push_type=push_type or None,
+                    delivery_scene=str(params.deliveryScene or "").strip() or None,
+                    enabled=enabled,
+                    keyword=str(params.keyword or "").strip() or None,
+                    limit=int(params.limit or 30),
+                    offset=int(params.offset or 0),
+                )
+            )
+            return _api_response(True, "Success", result)
+        except ValueError as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("PushContentCollectionHandler GET error: %s", error)
+            return _api_response(False, "Server error", None)
+
+    def POST(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            mutation = PushContentMutation.from_request_body(
+                json.loads(web.data() or b"{}")
+            )
+            content_id = push_repository.create_content(
+                **mutation.as_database_fields()
+            )
+            return _api_response(True, "Success", {"id": content_id})
+        except json.JSONDecodeError:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, "invalid JSON body", None)
+        except PushContentRequestError as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except sqlite3.IntegrityError:
+            web.ctx.status = '409 Conflict'
+            return _api_response(False, "contentNo already exists", None)
+        except Exception as error:
+            logger.exception("PushContentCollectionHandler POST error: %s", error)
+            return _api_response(False, "Server error", None)
+
+
+class PushContentItemHandler:
+    def PUT(self, content_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            mutation = PushContentMutation.from_request_body(
+                json.loads(web.data() or b"{}")
+            )
+            if not push_repository.update_content(
+                int(content_id), **mutation.as_database_fields()
+            ):
+                web.ctx.status = '404 Not Found'
+                return _api_response(False, "push content not found", None)
+            return _api_response(True, "Success", None)
+        except json.JSONDecodeError:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, "invalid JSON body", None)
+        except (ValueError, PushContentRequestError) as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except sqlite3.IntegrityError:
+            web.ctx.status = '409 Conflict'
+            return _api_response(False, "contentNo already exists", None)
+        except Exception as error:
+            logger.exception("PushContentItemHandler PUT error: %s", error)
+            return _api_response(False, "Server error", None)
+
+    def DELETE(self, content_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            if not push_repository.disable_content(int(content_id)):
+                web.ctx.status = '404 Not Found'
+                return _api_response(False, "push content not found", None)
+            return _api_response(True, "Success", None)
+        except ValueError as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("PushContentItemHandler DELETE error: %s", error)
+            return _api_response(False, "Server error", None)
+
+
+class PushContentImageCollectionHandler:
+    def POST(self, content_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            upload = web.input(file={}).get("file")
+            if not upload or not getattr(upload, "file", None):
+                web.ctx.status = '400 Bad Request'
+                return _api_response(False, "file is required", None)
+            image_bytes = upload.file.read(push_assets.MAX_PUSH_IMAGE_BYTES + 1)
+            result = push_assets.upload_image_for_content(
+                int(content_id),
+                getattr(upload, "filename", ""),
+                image_bytes,
+            )
+            return _api_response(True, "Success", result)
+        except (ValueError, PushContentImageRequestError) as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("PushContentImageCollectionHandler error: %s", error)
+            return _api_response(False, "Server error", None)
+
+
+class PushContentImageItemHandler:
+    def DELETE(self, content_id, image_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        denied = _require_admin()
+        if denied:
+            return denied
+        try:
+            if not push_repository.disable_content_image(
+                int(content_id), int(image_id)
+            ):
+                web.ctx.status = '404 Not Found'
+                return _api_response(False, "push content image not found", None)
+            return _api_response(True, "Success", None)
+        except ValueError as error:
+            web.ctx.status = '400 Bad Request'
+            return _api_response(False, str(error), None)
+        except Exception as error:
+            logger.exception("PushContentImageItemHandler error: %s", error)
+            return _api_response(False, "Server error", None)
+
+
 class AppVersionHandler:
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -1757,6 +2016,28 @@ class PushTestHandler:
             return _api_response(False, "Server error", None)
 
 
+class PushCardHandler:
+    def GET(self, push_id):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            user = _auth_user()
+            if not user:
+                web.ctx.status = '401 Unauthorized'
+                return _api_response(False, "unauthorized", None)
+            card = get_authenticated_user_push_card(user["id"], push_id)
+            if not card:
+                web.ctx.status = '404 Not Found'
+                return _api_response(False, "push card not found", None)
+            return _api_response(True, "Success", card)
+        except Exception as error:
+            logger.exception("PushCardHandler error: %s", error)
+            event_log.log_exception(
+                "push_card_failed", error, endpoint="/api/push/{pushId}/card"
+            )
+            return _api_response(False, "Server error", None)
+
+
 class ChatHistoryHandler:
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -1790,7 +2071,10 @@ class DiaryHandler:
             params = web.input(ts=None)
             if params.ts in (None, ""):
                 return _api_response(False, "ts is required", None)
-            return _api_response(True, "Success", db.get_user_diary_detail(user["id"], int(params.ts)))
+            timestamp_ms = int(params.ts)
+            detail = db.get_user_diary_detail(user["id"], timestamp_ms)
+            push_repository.mark_diary_viewed(user["id"], timestamp_ms)
+            return _api_response(True, "Success", detail)
         except ValueError:
             return _api_response(False, "Invalid ts", None)
         except Exception as e:
@@ -2120,17 +2404,26 @@ class WeatherHandler:
             import requests
             from datetime import datetime
 
-            api_key = conf().get("qweather_api_key", "1c50ee817a4d4bb2b338043de8c6410d")
+            api_key = str(conf().get("qweather_api_key", "") or "").strip()
+            if not api_key:
+                return json.dumps({"success": False, "message": "Weather API is not configured", "data": None}, ensure_ascii=False)
+            api_host = str(conf().get(
+                "qweather_api_host", "https://mt2x88w6bx.re.qweatherapi.com"
+            ) or "").strip().rstrip("/")
+            if not api_host:
+                return json.dumps({"success": False, "message": "Weather API is not configured", "data": None}, ensure_ascii=False)
+            if not api_host.startswith("https://"):
+                api_host = "https://" + api_host
             location = f"{grid_lon},{grid_lat}"
             headers = {"X-QW-Api-Key": api_key}
 
             # Fetch now weather
-            now_url = f"https://mt2x88w6bx.re.qweatherapi.com/v7/weather/now?location={location}"
+            now_url = f"{api_host}/v7/weather/now?location={location}"
             now_res_obj = requests.get(now_url, headers=headers, timeout=10)
             now_res = now_res_obj.json()
 
             # Fetch 3d weather
-            daily_url = f"https://mt2x88w6bx.re.qweatherapi.com/v7/weather/3d?location={location}"
+            daily_url = f"{api_host}/v7/weather/3d?location={location}"
             daily_res_obj = requests.get(daily_url, headers=headers, timeout=10)
             daily_res = daily_res_obj.json()
 

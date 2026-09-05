@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zlib
 from contextlib import closing
+from datetime import datetime
 from unittest.mock import patch
 
 import web
@@ -14,6 +15,7 @@ import web
 import channel.web.database as db
 from channel.web.push.contracts import (
     DiaryReadyPushNotification,
+    ProactivePushNotification,
     PushDeviceRequestError,
     PushTestNotification,
     PushTestRequestError,
@@ -133,6 +135,66 @@ class PushContractTest(unittest.TestCase):
     def test_push_test_notification_requires_title_and_content(self):
         with self.assertRaises(PushTestRequestError):
             PushTestNotification.from_request_body({"title": "联调标题"})
+
+    def test_proactive_notification_serializes_only_card_index(self):
+        notification = ProactivePushNotification.from_task({
+            "push_id": "psh_1",
+            "push_type": "greeting",
+            "card_json": json.dumps({
+                "type": "greeting", "title": "早上好", "body": "正文",
+                "action": "open_chat", "messageId": 12,
+            }),
+        })
+        body = notification.to_tencent_request_body(
+            "administrator", "registration-id", 123
+        )
+        extension = json.loads(body["OfflinePushInfo"]["Ext"])
+        self.assertEqual({"type": "greeting", "pushId": "psh_1"}, extension)
+        self.assertEqual("早上好", body["OfflinePushInfo"]["Title"])
+
+    def test_weather_card_details_are_not_sent_in_extension(self):
+        payload = {
+            "type": "weather", "title": "暴雨预警", "body": "请注意安全",
+            "action": "open_weather", "effectiveTime": None,
+            "onsetTime": None, "expireTime": None,
+            "headline": "标题" * 100, "description": "描述" * 200,
+            "criteria": "标准" * 200, "responseTypes": [],
+            "instruction": "指引" * 300,
+        }
+        notification = ProactivePushNotification.from_task({
+            "push_id": "psh_weather", "push_type": "weather",
+            "card_json": json.dumps(payload, ensure_ascii=False),
+        })
+        body = notification.to_tencent_request_body(
+            "administrator", "registration-id", 123
+        )
+        extension = json.loads(body["OfflinePushInfo"]["Ext"])
+        self.assertEqual(
+            {"type": "weather", "pushId": "psh_weather"}, extension
+        )
+        self.assertNotIn("instruction", extension)
+
+    def test_proactive_diary_extension_keeps_legacy_fields(self):
+        notification = ProactivePushNotification.from_task({
+            "push_id": "psh_diary",
+            "push_type": "diary",
+            "card_json": json.dumps({
+                "type": "diary",
+                "title": "日记写好啦",
+                "body": "来看看今天的日记。",
+                "diaryDate": "2026-09-05",
+                "ts": 1788566400000,
+            }),
+        })
+        body = notification.to_tencent_request_body(
+            "administrator", "registration-id", 123
+        )
+        self.assertEqual({
+            "type": "diary",
+            "pushId": "psh_diary",
+            "diaryDate": "2026-09-05",
+            "ts": 1788566400000,
+        }, json.loads(body["OfflinePushInfo"]["Ext"]))
 
 
 class TencentPushClientTest(unittest.TestCase):
@@ -282,13 +344,14 @@ class DiaryPushDeliveryTest(unittest.TestCase):
         self.old_db_path = db.DB_PATH
         db.DB_PATH = os.path.join(self.temp_dir.name, "soul.db")
         db.init_db()
+        self.now = datetime(2026, 7, 9, 23, 10, 0)
         with closing(db.get_db()) as conn:
             conn.execute("""
                 INSERT INTO user
                 (phone_number, invite_code, user_group, auth_token, account_status,
-                 tz_iana, tz_offset_min, created_at, updated_at)
+                 tz_iana, tz_offset_min, last_active_at, created_at, updated_at)
                 VALUES ('+8613800000000', 'test', 0, 'token', 'active',
-                        'Asia/Shanghai', 480, '2026-07-10 00:00:00',
+                        'Asia/Shanghai', 480, '2026-07-09 23:00:00', '2026-07-10 00:00:00',
                         '2026-07-10 00:00:00')
             """)
             self.user_id = conn.execute("SELECT id FROM user").fetchone()["id"]
@@ -304,10 +367,16 @@ class DiaryPushDeliveryTest(unittest.TestCase):
         db.complete_diary_job(
             job["id"], "散步", "正文", "摘要", [], "", "normal", [], "hash"
         )
+        with closing(db.get_db()) as conn:
+            conn.execute(
+                "UPDATE user_diary SET generated_at = '2026-07-09 23:10:00' WHERE id = ?",
+                (job["id"],),
+            )
+            conn.commit()
 
     def test_delivery_skips_when_user_has_no_registered_device(self):
         result = push_service.deliver_generated_diary_notification(
-            self.user_id, "2026-07-09"
+            self.user_id, "2026-07-09", now=self.now
         )
         self.assertEqual("SKIPPED", result["state"])
         self.assertEqual(
@@ -332,7 +401,7 @@ class DiaryPushDeliveryTest(unittest.TestCase):
             return_value="task-1",
         ):
             result = push_service.deliver_generated_diary_notification(
-                self.user_id, "2026-07-09"
+                self.user_id, "2026-07-09", now=self.now
             )
         delivery = db.get_diary_push_delivery(self.user_id, "2026-07-09")
         self.assertEqual("SENT", result["state"])
@@ -356,12 +425,74 @@ class DiaryPushDeliveryTest(unittest.TestCase):
             side_effect=push_service._TencentPushError("temporary"),
         ):
             result = push_service.deliver_generated_diary_notification(
-                self.user_id, "2026-07-09"
+                self.user_id, "2026-07-09", now=self.now
             )
         delivery = db.get_diary_push_delivery(self.user_id, "2026-07-09")
         self.assertEqual("PENDING", result["state"])
         self.assertEqual(1, delivery["push_retry_count"])
         self.assertIsNotNone(delivery["push_next_retry_at"])
+
+    def test_delivery_skips_after_local_2330(self):
+        db.register_user_push_device(self.user_id, "ios", "registration-id")
+        with closing(db.get_db()) as conn:
+            conn.execute("""
+                UPDATE user_diary SET generated_at = '2026-07-09 23:31:00'
+                WHERE user_id = ? AND diary_date = '2026-07-09'
+            """, (self.user_id,))
+            conn.commit()
+        result = push_service.deliver_generated_diary_notification(
+            self.user_id, "2026-07-09", now=datetime(2026, 7, 9, 23, 31)
+        )
+        self.assertEqual("SKIPPED", result["state"])
+
+    def test_delivery_skips_viewed_diary(self):
+        db.register_user_push_device(self.user_id, "ios", "registration-id")
+        with closing(db.get_db()) as conn:
+            conn.execute("""
+                INSERT INTO user_diary_view
+                (user_id, diary_date, viewed_at, created_at, updated_at)
+                VALUES (?, '2026-07-09', '2026-07-09 23:05:00',
+                        '2026-07-09 23:05:00', '2026-07-09 23:05:00')
+            """, (self.user_id,))
+            conn.commit()
+        result = push_service.deliver_generated_diary_notification(
+            self.user_id, "2026-07-09", now=self.now
+        )
+        self.assertEqual("SKIPPED", result["state"])
+
+    def test_delivery_skips_inactive_user(self):
+        db.register_user_push_device(self.user_id, "ios", "registration-id")
+        with closing(db.get_db()) as conn:
+            conn.execute(
+                "UPDATE user SET last_active_at = '2026-07-01 00:00:00' WHERE id = ?",
+                (self.user_id,),
+            )
+            conn.commit()
+        result = push_service.deliver_generated_diary_notification(
+            self.user_id, "2026-07-09", now=self.now
+        )
+        self.assertEqual("SKIPPED", result["state"])
+
+    def test_legacy_user_without_activity_keeps_existing_diary_push(self):
+        db.register_user_push_device(self.user_id, "ios", "registration-id")
+        with closing(db.get_db()) as conn:
+            conn.execute(
+                "UPDATE user SET last_active_at = NULL WHERE id = ?",
+                (self.user_id,),
+            )
+            conn.commit()
+        config = push_service._TencentPushConfig(
+            1, "administrator", "secret", "https://console.tim.qq.com", 10, 3
+        )
+        with patch.object(
+            push_service._TencentPushConfig, "from_runtime", return_value=config
+        ), patch.object(
+            push_service._TencentPushClient, "send", return_value="task-legacy"
+        ):
+            result = push_service.deliver_generated_diary_notification(
+                self.user_id, "2026-07-09", now=self.now
+            )
+        self.assertEqual("SENT", result["state"])
 
 
 class PushHttpApiTest(unittest.TestCase):

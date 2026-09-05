@@ -138,6 +138,18 @@ available_setting = {
     "tencent_im_push_timeout_seconds": 10,
     "tencent_im_push_max_retries": 3,
 
+    # 主动式 Push
+    "proactive_push_worker_enabled": False,
+    "proactive_push_worker_poll_seconds": 60,
+    "proactive_push_retry_limit": 100,
+    "qweather_api_host": "https://mt2x88w6bx.re.qweatherapi.com",
+    "qweather_api_key": "",
+    "push_asset_oss_access_key_id": "",
+    "push_asset_oss_access_key_secret": "",
+    "push_asset_oss_bucket": "ommo-app-assets-dev",
+    "push_asset_oss_endpoint": "oss-cn-wulanchabu.aliyuncs.com",
+    "push_asset_oss_read_url_ttl_seconds": 86400,
+
     "qwen_access_key_id": "",
     "qwen_access_key_secret": "",
     "qwen_agent_key": "",
@@ -398,7 +410,8 @@ def load_config():
         if name.startswith("_"):
             continue
         if name in available_setting:
-            logger.info("[INIT] override config by environ args: {}={}".format(name, value))
+            display_value = "***" if "key" in name or "secret" in name else value
+            logger.info("[INIT] override config by environ args: {}={}".format(name, display_value))
             try:
                 config[name] = eval(value)
             except:

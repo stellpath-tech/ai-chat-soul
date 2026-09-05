@@ -56,6 +56,11 @@ def init_db():
           tz_iana VARCHAR(255) NOT NULL DEFAULT 'Asia/Shanghai',
           tz_offset_min INTEGER NOT NULL DEFAULT 480,
           tz_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          last_active_at DATETIME DEFAULT NULL,
+          last_lat REAL DEFAULT NULL,
+          last_lon REAL DEFAULT NULL,
+          location_updated_at DATETIME DEFAULT NULL,
+          notification_enabled TINYINT NOT NULL DEFAULT 1,
           deletion_requested_at DATETIME DEFAULT NULL,
           deletion_deadline DATETIME DEFAULT NULL,
           deleted_at DATETIME DEFAULT NULL,
@@ -73,6 +78,11 @@ def init_db():
             "tz_iana": "VARCHAR(255) NOT NULL DEFAULT 'Asia/Shanghai'",
             "tz_offset_min": "INTEGER NOT NULL DEFAULT 480",
             "tz_updated_at": "DATETIME DEFAULT NULL",
+            "last_active_at": "DATETIME DEFAULT NULL",
+            "last_lat": "REAL DEFAULT NULL",
+            "last_lon": "REAL DEFAULT NULL",
+            "location_updated_at": "DATETIME DEFAULT NULL",
+            "notification_enabled": "TINYINT NOT NULL DEFAULT 1",
             "deletion_requested_at": "DATETIME DEFAULT NULL",
             "deletion_deadline": "DATETIME DEFAULT NULL",
             "deleted_at": "DATETIME DEFAULT NULL",
@@ -243,6 +253,94 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_user_diary_push_pending "
             "ON user_diary(push_state, push_next_retry_at, push_started_at)"
         )
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_diary_view (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id BIGINT NOT NULL,
+          diary_date VARCHAR(10) NOT NULL,
+          viewed_at DATETIME NOT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, diary_date)
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS push_content (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_no VARCHAR(64) NOT NULL UNIQUE,
+          push_type VARCHAR(16) NOT NULL,
+          delivery_scene VARCHAR(64) NOT NULL,
+          title VARCHAR(255) NOT NULL,
+          body TEXT NOT NULL,
+          enabled TINYINT NOT NULL DEFAULT 1,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_content_select "
+            "ON push_content(push_type, delivery_scene, enabled)"
+        )
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS push_content_image (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          content_id BIGINT NOT NULL,
+          object_key TEXT NOT NULL,
+          sha256 VARCHAR(64) NOT NULL DEFAULT '',
+          size_bytes INTEGER NOT NULL DEFAULT 0,
+          enabled TINYINT NOT NULL DEFAULT 1,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(content_id, object_key)
+        )
+        ''')
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_content_image_active "
+            "ON push_content_image(content_id, enabled)"
+        )
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_push_task (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          push_id VARCHAR(64) NOT NULL UNIQUE,
+          user_id BIGINT NOT NULL,
+          push_type VARCHAR(16) NOT NULL,
+          local_date VARCHAR(10) NOT NULL,
+          business_key VARCHAR(255) NOT NULL,
+          content_id BIGINT NOT NULL DEFAULT 0,
+          source_id BIGINT NOT NULL DEFAULT 0,
+          scheduled_at DATETIME NOT NULL,
+          state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+          card_json TEXT NOT NULL DEFAULT '{}',
+          chat_message_id BIGINT NOT NULL DEFAULT 0,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          next_retry_at DATETIME DEFAULT NULL,
+          started_at DATETIME DEFAULT NULL,
+          provider_task_id VARCHAR(255) NOT NULL DEFAULT '',
+          error TEXT NOT NULL DEFAULT '',
+          sent_at DATETIME DEFAULT NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(user_id, push_type, business_key)
+        )
+        ''')
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_push_task_due "
+            "ON user_push_task(state, scheduled_at, next_retry_at, started_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_push_task_content_history "
+            "ON user_push_task(user_id, content_id, state, sent_at)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_push_task_daily "
+            "ON user_push_task(user_id, push_type, local_date, state)"
+        )
+
+        _seed_push_content(cursor)
         
         conn.commit()
 
@@ -252,6 +350,38 @@ def _ensure_columns(cursor, table_name, columns):
     for name, definition in columns.items():
         if name not in existing:
             cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {definition}")
+
+
+def _seed_push_content(cursor):
+    seed_path = os.path.join(os.path.dirname(__file__), "push", "content_seed.json")
+    if not os.path.isfile(seed_path):
+        return
+    with open(seed_path, "r", encoding="utf-8") as seed_file:
+        contents = json.load(seed_file)
+    for item in contents:
+        cursor.execute("""
+            INSERT OR IGNORE INTO push_content
+            (content_no, push_type, delivery_scene, title, body, enabled)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            item["content_no"], item["push_type"], item["delivery_scene"],
+            item["title"], item["body"], 1 if item.get("enabled", True) else 0,
+        ))
+        content_row = cursor.execute(
+            "SELECT id FROM push_content WHERE content_no = ?",
+            (item["content_no"],),
+        ).fetchone()
+        if not content_row:
+            continue
+        for image in item.get("images") or []:
+            cursor.execute("""
+                INSERT OR IGNORE INTO push_content_image
+                (content_id, object_key, sha256, size_bytes, enabled)
+                VALUES (?, ?, ?, ?, 1)
+            """, (
+                content_row["id"], image["object_key"],
+                image.get("sha256", ""), int(image.get("size_bytes") or 0),
+            ))
 
 def generate_token():
     return uuid.uuid4().hex
@@ -625,6 +755,8 @@ def _purge_deleted_user_data(cursor, user_id, deleted_at):
 
     _delete_from_existing_table(cursor, "user_chat_message", "user_id = ?", (user_id,))
     _delete_from_existing_table(cursor, "user_diary", "user_id = ?", (user_id,))
+    _delete_from_existing_table(cursor, "user_diary_view", "user_id = ?", (user_id,))
+    _delete_from_existing_table(cursor, "user_push_task", "user_id = ?", (user_id,))
     _delete_from_existing_table(cursor, "user_push_device", "user_id = ?", (user_id,))
     _delete_from_existing_table(
         cursor,

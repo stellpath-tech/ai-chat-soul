@@ -690,6 +690,15 @@ class ChatChannel(Channel):
                     except Exception:
                         pass
                 event_log.log_exception("callback_failed", e, stage="thread_pool_callback", **fields)
+            ctx = kwargs.get("context")
+            if ctx is not None and ctx.get("proactive_conversation_tracked"):
+                try:
+                    from channel.web.push.conversation import conversation_activity
+                    conversation_activity.finish(
+                        ctx.get("user_id"), ctx.get("request_id")
+                    )
+                except Exception as e:
+                    logger.warning("Conversation tracking cleanup failed: %s", e)
             with self.lock:
                 self.sessions[session_id][1].release()
 
