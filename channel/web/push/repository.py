@@ -4,6 +4,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 import channel.web.database as core_db
+from channel.web.push.catalog import content_categories, find_content_scene
 
 
 APP_TIMEZONE = timezone(timedelta(hours=8))
@@ -142,6 +143,38 @@ def get_diary_candidate(user_id, diary_date):
     return dict(row) if row else None
 
 
+def get_content_catalog():
+    with closing(core_db.get_db()) as conn:
+        counts = conn.execute("""
+            SELECT c.push_type, c.delivery_scene, COUNT(*) AS total,
+                   SUM(c.enabled = 1) AS enabled_count,
+                   SUM(NOT EXISTS (SELECT 1 FROM push_content_image i
+                       WHERE i.content_id = c.id AND i.enabled = 1)) AS missing_images
+            FROM push_content c GROUP BY c.push_type, c.delivery_scene
+        """).fetchall()
+    by_scene = {(row["push_type"], row["delivery_scene"]): row for row in counts}
+    categories = content_categories()
+    for category in categories:
+        known = {scene["value"] for group in category["groups"] for scene in group["scenes"]}
+        unknown = [row for row in counts if row["push_type"] == category["type"]
+                   and row["delivery_scene"] not in known]
+        if unknown:
+            category["groups"].append({"label": "待归类的历史数据", "scenes": [
+                {"value": row["delivery_scene"], "label": row["delivery_scene"],
+                 "description": "请编辑文案，选择一个有效分类", "legacy": True}
+                for row in unknown
+            ]})
+        category["total"] = 0
+        for group in category["groups"]:
+            for scene in group["scenes"]:
+                row = by_scene.get((category["type"], scene["value"]))
+                scene["total"] = int(row["total"]) if row else 0
+                scene["enabledCount"] = int(row["enabled_count"]) if row else 0
+                scene["missingImages"] = int(row["missing_images"]) if row else 0
+                category["total"] += scene["total"]
+    return {"categories": categories}
+
+
 def list_contents(
     push_type=None,
     delivery_scene=None,
@@ -216,6 +249,19 @@ def _format_content(row, images):
 def create_content(content_no, push_type, delivery_scene, title, body, enabled=True):
     now_str = _format_datetime(_now_app_timezone())
     with closing(core_db.get_db()) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if not content_no:
+            scene = find_content_scene(push_type, delivery_scene)
+            if not scene:
+                raise ValueError("unsupported delivery scene")
+            prefix = scene["contentPrefix"] + "-"
+            numbers = [str(row[0])[len(prefix):] for row in conn.execute(
+                "SELECT content_no FROM push_content WHERE substr(content_no, 1, ?) = ?",
+                (len(prefix), prefix),
+            )]
+            content_no = prefix + "{:02d}".format(max(
+                [int(number) for number in numbers if number.isdecimal()] or [0]
+            ) + 1)
         cursor = conn.execute("""
             INSERT INTO push_content
             (content_no, push_type, delivery_scene, title, body, enabled, created_at, updated_at)
@@ -233,7 +279,7 @@ def update_content(content_id, content_no, push_type, delivery_scene, title, bod
     with closing(core_db.get_db()) as conn:
         cursor = conn.execute("""
             UPDATE push_content
-            SET content_no = ?, push_type = ?, delivery_scene = ?, title = ?,
+            SET content_no = COALESCE(NULLIF(?, ''), content_no), push_type = ?, delivery_scene = ?, title = ?,
                 body = ?, enabled = ?, updated_at = ?
             WHERE id = ?
         """, (

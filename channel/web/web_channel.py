@@ -1194,6 +1194,7 @@ class WebChannel(ChatChannel):
             '/api/admin/complaints/comment', 'ComplaintAdminCommentHandler',
             '/api/admin/complaints/status', 'ComplaintAdminStatusHandler',
             '/api/admin/push-contents', 'PushContentCollectionHandler',
+            '/api/admin/push-contents/catalog', 'PushContentCatalogHandler',
             r'/api/admin/push-contents/(\d+)', 'PushContentItemHandler',
             r'/api/admin/push-contents/(\d+)/images', 'PushContentImageCollectionHandler',
             r'/api/admin/push-contents/(\d+)/images/(\d+)', 'PushContentImageItemHandler',
@@ -1753,6 +1754,15 @@ class ComplaintAdminStatusHandler:
             return _api_response(False, "Server error", None)
 
 
+class PushContentCatalogHandler:
+    def GET(self):
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        denied = _require_admin()
+        if denied:
+            return denied
+        return _api_response(True, "Success", push_repository.get_content_catalog())
+
+
 class PushContentCollectionHandler:
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -1874,7 +1884,7 @@ class PushContentImageCollectionHandler:
             return denied
         try:
             upload = web.input(file={}).get("file")
-            if not upload or not getattr(upload, "file", None):
+            if upload is None or getattr(upload, "file", None) is None:
                 web.ctx.status = '400 Bad Request'
                 return _api_response(False, "file is required", None)
             image_bytes = upload.file.read(push_assets.MAX_PUSH_IMAGE_BYTES + 1)

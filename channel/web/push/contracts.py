@@ -1,4 +1,6 @@
 import json
+import re
+from channel.web.push.catalog import find_content_scene
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -123,13 +125,18 @@ class PushContentMutation:
     def from_request_body(cls, payload):
         if not isinstance(payload, dict):
             raise PushContentRequestError("request body must be an object")
-        content_no = _content_required_text(payload, "contentNo", 64)
+        content_no = payload.get("contentNo", "")
+        if not isinstance(content_no, str):
+            raise PushContentRequestError("文案编号必须为文本")
+        content_no = content_no.strip()
+        if content_no and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", content_no):
+            raise PushContentRequestError("文案编号仅支持字母、数字、下划线和短横线，最多 64 位")
         push_type = _content_required_text(payload, "pushType", 16).lower()
         if push_type not in SUPPORTED_PUSH_TYPES:
             raise PushContentRequestError("invalid pushType")
         delivery_scene = _content_required_text(payload, "deliveryScene", 64).upper()
-        if not delivery_scene.startswith(push_type.upper() + "_"):
-            raise PushContentRequestError("deliveryScene does not match pushType")
+        if not find_content_scene(push_type, delivery_scene):
+            raise PushContentRequestError("请选择该类型支持的发送时间段或场景")
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise PushContentRequestError("enabled must be a boolean")

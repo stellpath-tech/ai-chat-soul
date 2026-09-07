@@ -4,242 +4,99 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Push 文案管理</title>
-  <style>
-    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #f5f6f8; color: #202124; }
-    button, input, select, textarea { font: inherit; }
-    button { cursor: pointer; border: 0; border-radius: 8px; padding: 9px 14px; }
-    .primary { background: #111827; color: white; }
-    .danger { background: #fee2e2; color: #b91c1c; }
-    .ghost { background: #eef0f3; color: #374151; }
-    .hidden { display: none !important; }
-    .login { min-height: 100vh; display: grid; place-items: center; }
-    .login-card, .panel { background: white; border: 1px solid #e5e7eb; border-radius: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.05); }
-    .login-card { width: min(380px, 90vw); padding: 28px; }
-    .login-card input { width: 100%; margin: 16px 0 10px; }
-    .app { padding: 24px; max-width: 1500px; margin: auto; }
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
-    h1 { margin: 0; font-size: 24px; }
-    .layout { display: grid; grid-template-columns: minmax(650px, 1.4fr) minmax(380px, .8fr); gap: 18px; }
-    .panel { padding: 18px; min-width: 0; }
-    .filters { display: grid; grid-template-columns: 150px 180px 130px 1fr auto; gap: 10px; margin-bottom: 14px; }
-    input, select, textarea { border: 1px solid #d1d5db; border-radius: 8px; padding: 9px 10px; width: 100%; background: white; }
-    textarea { min-height: 110px; resize: vertical; }
-    table { border-collapse: collapse; width: 100%; font-size: 14px; }
-    th, td { text-align: left; padding: 10px; border-bottom: 1px solid #edf0f2; vertical-align: top; }
-    th { color: #6b7280; font-weight: 600; }
-    tr[data-id] { cursor: pointer; }
-    tr[data-id]:hover, tr.active { background: #f3f4f6; }
-    .body-cell { max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .toolbar, .actions, .pagination { display: flex; gap: 8px; align-items: center; }
-    .pagination { justify-content: space-between; margin-top: 14px; }
-    .field { margin-bottom: 12px; }
-    .field label { display: block; color: #6b7280; font-size: 13px; margin-bottom: 5px; }
-    .images { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0; }
-    .image-card { position: relative; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; aspect-ratio: 1; background: #f3f4f6; }
-    .image-card img { width: 100%; height: 100%; object-fit: cover; }
-    .image-card button { position: absolute; right: 5px; top: 5px; padding: 5px 8px; background: rgba(185,28,28,.9); color: white; }
-    .muted { color: #6b7280; font-size: 13px; }
-    .error { color: #b91c1c; min-height: 20px; }
-    @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } .filters { grid-template-columns: 1fr 1fr; } }
-  </style>
+  <link rel="stylesheet" href="/assets/css/admin.css">
+  <link rel="stylesheet" href="/assets/css/push-contents.css">
 </head>
 <body>
-  <section id="login" class="login">
-    <div class="login-card">
+  <section id="loginView" class="login-shell">
+    <form id="loginForm" class="panel login-card">
+      <p class="eyebrow">Push Console</p>
       <h1>Push 文案管理</h1>
-      <p class="muted">请输入管理员口令</p>
-      <input id="passcode" type="password" autocomplete="current-password">
-      <button id="loginButton" class="primary">进入</button>
-      <p id="loginError" class="error"></p>
-    </div>
+      <p class="hero-copy">输入口令后进入后台。口令会保存在本机浏览器，后续进入页面会自动校验。</p>
+      <label for="passcodeInput">管理员访问口令</label>
+      <input id="passcodeInput" type="password" placeholder="输入访问口令" autocomplete="current-password" required>
+      <a class="token-link" href="https://ecnhmcc1f7mq.feishu.cn/wiki/KIy6weNvniJsWxkAs0DcazMunRf" target="_blank" rel="noopener noreferrer">获取 token（访问口令）↗</a>
+      <p class="muted">在文档中获取后台口令，两个管理后台通用。</p>
+      <div class="login-actions"><button id="loginButton" class="button primary" type="submit">进入</button></div>
+      <p id="loginError" class="error" role="alert"></p>
+    </form>
   </section>
 
-  <main id="app" class="app hidden">
-    <header>
-      <div><h1>Push 文案管理</h1><p id="summary" class="muted"></p></div>
-      <div class="toolbar"><button id="newButton" class="primary">新增文案</button><button id="logoutButton" class="ghost">退出</button></div>
-    </header>
-    <div class="layout">
-      <section class="panel">
+  <main id="appView" class="app-shell hidden">
+    <nav class="admin-nav" aria-label="后台导航">
+      <a href="/complaints">客诉浏览</a><a href="/push-contents" aria-current="page">Push 文案管理</a>
+      <button id="logoutButton" class="button" type="button">退出登录</button>
+    </nav>
+    <section class="panel hero">
+      <div>
+        <p class="eyebrow">Push Console</p>
+        <h1>Push 文案管理</h1>
+        <p class="hero-copy">按发送时间、天气类型和召回节点，维护满仓的每一次主动问候。</p>
+      </div>
+      <div class="metric-card"><span id="metricLabel">当前分类</span><strong id="totalCount">—</strong><small id="statusSummary" class="muted">正在加载分类</small></div>
+    </section>
+    <div id="pageMessage" class="message hidden" role="status" aria-live="polite"></div>
+    <button id="retryButton" class="button hidden" type="button">重新加载</button>
+    <nav id="typeTabs" class="panel type-tabs" aria-label="消息类型"></nav>
+    <div class="content-layout">
+      <aside class="panel scene-panel">
+        <h2 id="sceneHeading">发送时间段</h2>
+        <p class="muted">数字为该分类文案总数</p>
+        <nav id="sceneNav" aria-label="文案分类"></nav>
+      </aside>
+      <section class="panel content-panel">
+        <div class="section-heading">
+          <div><p id="categoryLabel" class="eyebrow"></p><h2 id="sceneTitle"></h2></div>
+          <button id="newButton" class="button primary" type="button">新增文案</button>
+        </div>
+        <p id="sceneDescription" class="hero-copy"></p>
         <div class="filters">
-          <select id="typeFilter"><option value="">全部类型</option><option value="greeting">问候</option><option value="weather">天气</option><option value="diary">日记</option><option value="recall">召回</option></select>
-          <input id="sceneFilter" placeholder="投放场景">
-          <select id="enabledFilter"><option value="">全部状态</option><option value="true">启用</option><option value="false">停用</option></select>
-          <input id="keywordFilter" placeholder="搜索编号、标题或正文">
-          <button id="searchButton" class="ghost">查询</button>
+          <label>文案状态<select id="enabledFilter"><option value="">全部状态</option><option value="true">启用</option><option value="false">停用</option></select></label>
+          <label>搜索当前分类<input id="keywordFilter" type="search" placeholder="标题、正文或编号"></label>
+          <button id="searchButton" class="button" type="button">查询</button>
         </div>
-        <div style="overflow:auto">
-          <table><thead><tr><th>编号</th><th>类型</th><th>场景</th><th>标题</th><th>正文</th><th>插图</th><th>状态</th></tr></thead><tbody id="contentRows"></tbody></table>
+        <div id="contentRows" class="content-list" aria-live="polite"></div>
+        <div class="pager">
+          <span id="pageInfo"></span>
+          <div><button id="prevButton" class="button" type="button">上一页</button> <button id="nextButton" class="button" type="button">下一页</button></div>
         </div>
-        <div class="pagination"><button id="prevButton" class="ghost">上一页</button><span id="pageInfo" class="muted"></span><button id="nextButton" class="ghost">下一页</button></div>
       </section>
-
-      <aside class="panel">
-        <form id="contentForm">
-          <h2 id="formTitle">新增文案</h2>
-          <div class="field"><label>文案编号</label><input id="contentNo" required></div>
-          <div class="field"><label>Push 类型</label><select id="pushType" required><option value="greeting">问候</option><option value="weather">天气</option><option value="diary">日记</option><option value="recall">召回</option></select></div>
-          <div class="field"><label>投放场景</label><input id="deliveryScene" required></div>
-          <div class="field"><label>标题</label><input id="title" required maxlength="255"></div>
-          <div class="field"><label>正文</label><textarea id="body" required maxlength="2000"></textarea></div>
-          <div class="field"><label><input id="enabled" type="checkbox" style="width:auto" checked> 启用</label></div>
-          <div class="actions"><button type="submit" class="primary">保存</button><button id="disableButton" type="button" class="danger hidden">停用</button></div>
-          <p id="formError" class="error"></p>
-        </form>
-        <section id="imageSection" class="hidden">
-          <hr style="border:0;border-top:1px solid #e5e7eb;margin:20px 0">
-          <h3>关联插图</h3>
-          <div id="images" class="images"></div>
-          <input id="imageFile" type="file" accept="image/png,image/jpeg,image/webp">
-          <button id="uploadButton" type="button" class="ghost" style="margin-top:8px">上传插图</button>
-        </section>
+      <aside id="editorPanel" class="panel detail-panel editor-panel">
+        <div id="emptyEditor" class="empty-state">选择一条文案查看详情，<br>或在当前分类中新增文案。</div>
+        <div id="editorView" class="hidden">
+          <form id="contentForm">
+            <div class="detail-title"><h2 id="formTitle">新增文案</h2><span id="editState" class="pill"></span></div>
+            <p id="editorContext" class="muted"></p>
+            <fieldset id="editorFields">
+              <div class="field"><label for="pushType">消息类型</label><select id="pushType" required></select></div>
+              <div class="field"><label id="deliverySceneLabel" for="deliveryScene">发送时间段</label><select id="deliveryScene" required></select><p id="formSceneHint" class="field-hint"></p></div>
+              <div class="field"><label for="title">标题</label><input id="title" required maxlength="255" placeholder="例如：早餐要热乎乎的"></div>
+              <div class="field"><label for="body">正文</label><textarea id="body" required maxlength="2000" placeholder="写下满仓想对用户说的话"></textarea></div>
+              <div class="field"><label for="contentNo">文案编号 <span class="muted">自动生成</span></label><input id="contentNo" readonly placeholder="保存后自动生成"></div>
+              <label class="checkbox"><input id="enabled" type="checkbox" checked> 启用这条文案</label>
+              <p id="ctaHint" class="field-hint"></p>
+              <div class="editor-actions"><button id="saveButton" class="button primary" type="submit">保存文案</button><button id="disableButton" class="button danger hidden" type="button">停用</button><button id="cancelButton" class="button" type="button">取消编辑</button></div>
+            </fieldset>
+            <p id="formError" class="error" role="alert"></p>
+          </form>
+          <section class="detail-block">
+            <h3>关联插图 <span id="imageCount" class="muted"></span></h3>
+            <p class="muted">可关联多张图片，每次推送随机使用一张。</p>
+            <div id="images" class="image-grid"></div>
+            <div id="imageSection" class="hidden">
+              <label class="field-hint" for="imageFile">PNG、JPG、WEBP · 每张不超过 10 MB · 可多选</label>
+              <input id="imageFile" type="file" multiple accept="image/png,image/jpeg,image/webp">
+              <button id="uploadButton" class="button" type="button">上传选中图片</button>
+              <p id="uploadStatus" class="field-hint" role="status"></p>
+            </div>
+            <p id="saveFirstHint" class="muted">先保存文案，再添加插图。</p>
+          </section>
+        </div>
       </aside>
     </div>
   </main>
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const storageKey = 'push-admin-passcode';
-    const pageSize = 30;
-    let passcode = '';
-    let offset = 0;
-    let total = 0;
-    let items = [];
-    let selectedId = null;
-
-    function escapeHtml(value) {
-      return String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
-    }
-
-    async function api(path, options = {}) {
-      const headers = new Headers(options.headers || {});
-      headers.set('x-admin-passcode', passcode);
-      if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
-      const response = await fetch(path, {...options, headers});
-      const payload = await response.json();
-      if (!response.ok || !payload.success) throw new Error(payload.message || `HTTP ${response.status}`);
-      return payload.data;
-    }
-
-    function queryString() {
-      const params = new URLSearchParams({limit: pageSize, offset});
-      if ($('typeFilter').value) params.set('pushType', $('typeFilter').value);
-      if ($('sceneFilter').value.trim()) params.set('deliveryScene', $('sceneFilter').value.trim());
-      if ($('enabledFilter').value) params.set('enabled', $('enabledFilter').value);
-      if ($('keywordFilter').value.trim()) params.set('keyword', $('keywordFilter').value.trim());
-      return params.toString();
-    }
-
-    async function loadContents(reset = false) {
-      if (reset) offset = 0;
-      const data = await api(`/api/admin/push-contents?${queryString()}`);
-      items = data.items || [];
-      total = data.total || 0;
-      $('summary').textContent = `共 ${total} 条文案`;
-      $('pageInfo').textContent = `${offset + 1}-${Math.min(offset + items.length, total)} / ${total}`;
-      $('prevButton').disabled = offset === 0;
-      $('nextButton').disabled = offset + pageSize >= total;
-      $('contentRows').innerHTML = items.map((item) => `
-        <tr data-id="${item.id}" class="${item.id === selectedId ? 'active' : ''}">
-          <td>${escapeHtml(item.contentNo)}</td><td>${escapeHtml(item.pushType)}</td>
-          <td>${escapeHtml(item.deliveryScene)}</td><td>${escapeHtml(item.title)}</td>
-          <td class="body-cell">${escapeHtml(item.body)}</td><td>${item.images.length}</td>
-          <td>${item.enabled ? '启用' : '停用'}</td>
-        </tr>`).join('');
-      document.querySelectorAll('tr[data-id]').forEach((row) => row.addEventListener('click', () => selectContent(Number(row.dataset.id))));
-      if (selectedId) selectContent(selectedId);
-    }
-
-    function selectContent(id) {
-      const item = items.find((value) => value.id === id);
-      if (!item) return;
-      selectedId = id;
-      $('formTitle').textContent = `编辑 ${item.contentNo}`;
-      $('contentNo').value = item.contentNo;
-      $('pushType').value = item.pushType;
-      $('deliveryScene').value = item.deliveryScene;
-      $('title').value = item.title;
-      $('body').value = item.body;
-      $('enabled').checked = item.enabled;
-      $('disableButton').classList.toggle('hidden', !item.enabled);
-      $('imageSection').classList.remove('hidden');
-      renderImages(item.images || []);
-      document.querySelectorAll('tr[data-id]').forEach((row) => row.classList.toggle('active', Number(row.dataset.id) === id));
-    }
-
-    function newContent() {
-      selectedId = null;
-      $('contentForm').reset();
-      $('enabled').checked = true;
-      $('formTitle').textContent = '新增文案';
-      $('disableButton').classList.add('hidden');
-      $('imageSection').classList.add('hidden');
-      $('formError').textContent = '';
-    }
-
-    function renderImages(images) {
-      $('images').innerHTML = images.length ? images.map((image) => `
-        <div class="image-card"><img src="${escapeHtml(image.imageUrl)}" alt="Push 插图" loading="lazy"><button type="button" data-image-id="${image.imageId}">移除</button></div>
-      `).join('') : '<p class="muted">暂无插图</p>';
-      document.querySelectorAll('[data-image-id]').forEach((button) => button.addEventListener('click', () => removeImage(Number(button.dataset.imageId))));
-    }
-
-    async function saveContent(event) {
-      event.preventDefault();
-      $('formError').textContent = '';
-      const body = JSON.stringify({
-        contentNo: $('contentNo').value.trim(), pushType: $('pushType').value,
-        deliveryScene: $('deliveryScene').value.trim(), title: $('title').value.trim(),
-        body: $('body').value.trim(), enabled: $('enabled').checked,
-      });
-      try {
-        if (selectedId) await api(`/api/admin/push-contents/${selectedId}`, {method: 'PUT', body});
-        else selectedId = (await api('/api/admin/push-contents', {method: 'POST', body})).id;
-        await loadContents(false);
-      } catch (error) { $('formError').textContent = error.message; }
-    }
-
-    async function disableContent() {
-      if (!selectedId || !confirm('确认停用这条文案？')) return;
-      await api(`/api/admin/push-contents/${selectedId}`, {method: 'DELETE'});
-      await loadContents(false);
-    }
-
-    async function uploadImage() {
-      const file = $('imageFile').files[0];
-      if (!selectedId || !file) return;
-      const form = new FormData(); form.append('file', file);
-      try { await api(`/api/admin/push-contents/${selectedId}/images`, {method: 'POST', body: form}); $('imageFile').value = ''; await loadContents(false); }
-      catch (error) { $('formError').textContent = error.message; }
-    }
-
-    async function removeImage(imageId) {
-      if (!selectedId || !confirm('确认移除这张插图？')) return;
-      await api(`/api/admin/push-contents/${selectedId}/images/${imageId}`, {method: 'DELETE'});
-      await loadContents(false);
-    }
-
-    async function login(value) {
-      passcode = value;
-      try { await loadContents(true); localStorage.setItem(storageKey, passcode); $('login').classList.add('hidden'); $('app').classList.remove('hidden'); }
-      catch (error) { passcode = ''; $('loginError').textContent = '口令错误'; }
-    }
-
-    $('loginButton').addEventListener('click', () => login($('passcode').value));
-    $('passcode').addEventListener('keydown', (event) => { if (event.key === 'Enter') $('loginButton').click(); });
-    $('logoutButton').addEventListener('click', () => { localStorage.removeItem(storageKey); location.reload(); });
-    $('newButton').addEventListener('click', newContent);
-    $('searchButton').addEventListener('click', () => loadContents(true));
-    $('keywordFilter').addEventListener('keydown', (event) => { if (event.key === 'Enter') loadContents(true); });
-    $('prevButton').addEventListener('click', () => { offset = Math.max(0, offset - pageSize); loadContents(false); });
-    $('nextButton').addEventListener('click', () => { offset += pageSize; loadContents(false); });
-    $('contentForm').addEventListener('submit', saveContent);
-    $('disableButton').addEventListener('click', disableContent);
-    $('uploadButton').addEventListener('click', uploadImage);
-
-    const stored = localStorage.getItem(storageKey);
-    if (stored) login(stored);
-  </script>
+  <dialog id="imagePreview"><button id="closePreview" class="button" type="button">关闭预览</button><img id="previewImage" alt="文案插图预览"></dialog>
+  <script src="/assets/js/admin-auth.js"></script>
+  <script src="/assets/js/push-contents.js"></script>
 </body>
 </html>

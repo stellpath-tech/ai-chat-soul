@@ -8,30 +8,12 @@ from common.log import logger
 from config import conf
 from channel.web.push.contracts import _user_timezone
 from channel.web.push import repository
+from channel.web.push.catalog import GREETING_WINDOWS, WEATHER_SCENE_KEYWORDS
 
 
 APP_TIMEZONE = timezone(timedelta(hours=8))
-GREETING_WINDOWS = {
-    "morning": ["0700", "0730", "0800", "0830", "0900"],
-    "noon": ["1100", "1130", "1200", "1230", "1300"],
-    "evening": ["1800", "1830", "1900", "1930", "2000", "2030", "2100"],
-}
 SEVERITY_PRIORITY = {"moderate": 1, "severe": 2, "extreme": 3}
 URGENCY_PRIORITY = {"expected": 1, "immediate": 2}
-WEATHER_SCENE_KEYWORDS = [
-    ("WEATHER_TYPHOON", ("台风", "热带气旋")),
-    ("WEATHER_HAIL", ("冰雹", "强对流")),
-    ("WEATHER_THUNDER", ("雷电", "雷雨", "雷暴")),
-    ("WEATHER_SHOWER", ("骤雨", "短时强降水")),
-    ("WEATHER_HEAVY_RAIN", ("暴雨", "强降水")),
-    ("WEATHER_COLD", ("寒潮", "强降温", "低温")),
-    ("WEATHER_HEAT", ("高温", "热浪")),
-    ("WEATHER_GALE", ("大风", "阵风")),
-    ("WEATHER_SNOW", ("暴雪", "大雪")),
-    ("WEATHER_ICE", ("冻雨", "道路结冰", "结冰")),
-    ("WEATHER_FOG", ("大雾", "浓雾", "低能见度")),
-    ("WEATHER_DUST", ("沙尘暴", "扬沙", "沙尘")),
-]
 
 
 def generate_greeting_plans(now_utc=None, random_source=None):
