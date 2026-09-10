@@ -33,6 +33,7 @@ class ChatService:
         session_id: str,
         send_chunk_fn: Callable[[dict], None],
         parent_reply_mode: Optional[str] = None,
+        quote: Optional[dict] = None,
     ):
         """
         Run the agent for *query* and stream results back via *send_chunk_fn*.
@@ -44,13 +45,22 @@ class ChatService:
         :param session_id: session identifier for agent isolation
         :param send_chunk_fn: callable(chunk_data: dict) to send a streaming chunk
         :param parent_reply_mode: client-reported current mode before this turn
+        :param quote: history message the user is quoting, or None
         """
+        from agent.chat.quote import (
+            append_quote_instruction,
+            compose_with_quote,
+            normalize_quote,
+        )
         from agent.chat.reply_mode import (
             append_reply_mode_instruction,
             classify_reply_mode,
             normalize_parent_reply_mode,
         )
 
+        # Classify on what the user actually typed; the quote is folded into the
+        # query only just before the model call.
+        quote = normalize_quote(quote)
         parent_reply_mode = normalize_parent_reply_mode(parent_reply_mode)
         reply_mode = classify_reply_mode(
             query,
@@ -139,6 +149,7 @@ class ChatService:
 
         # Get full system prompt with skills
         full_system_prompt = agent.get_full_system_prompt()
+        full_system_prompt = append_quote_instruction(full_system_prompt, quote)
         full_system_prompt = append_reply_mode_instruction(
             full_system_prompt,
             reply_mode,
@@ -164,7 +175,7 @@ class ChatService:
         )
 
         try:
-            response = executor.run_stream(query)
+            response = executor.run_stream(compose_with_quote(query, quote))
         except Exception:
             # If executor cleared messages (context overflow), sync back
             if len(executor.messages) == 0:

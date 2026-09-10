@@ -673,6 +673,7 @@ class WebChannel(ChatChannel):
             
             # 优先使用 token 解析出的 user_id 作为 session
             session_id = None
+            user = None
             user_id = -1
             user_group = -1
             phone_number = ""
@@ -720,6 +721,20 @@ class WebChannel(ChatChannel):
             sensor_label = json_data.get('sensor_label', '')  # 由前端从 GET /api/weather 拿到后回传
             db.record_user_timezone_async(user_id, timezone)
 
+            # 跨过用户本地零点、且静默满 2 小时，就把对话上下文切成新的一天。
+            # 只清对话，session_id / 长期记忆 / 昵称都保留。
+            try:
+                from agent.chat.session_rotate import maybe_rotate, resolve_timezone
+                from config import conf as _rot_conf
+                from common.utils import expand_path as _rot_expand
+                maybe_rotate(
+                    _rot_expand(_rot_conf().get("agent_workspace", "~/cow")),
+                    session_id,
+                    resolve_timezone(timezone, user),
+                )
+            except Exception as _sre:
+                logger.warning(f"[SessionRotate] skipped for {session_id}: {_sre}")
+
             request_id = self._generate_request_id()
             self.request_to_session[request_id] = session_id
 
@@ -730,6 +745,11 @@ class WebChannel(ChatChannel):
                 classify_reply_mode,
                 normalize_parent_reply_mode,
             )
+            from agent.chat.quote import normalize_quote
+
+            # 用户引用的历史消息（可选）。非法/空引用一律降级为无引用。
+            quote = normalize_quote(json_data.get("quote"))
+
             parent_reply_mode = normalize_parent_reply_mode(
                 json_data.get("parent_reply_mode"),
             )
@@ -774,6 +794,7 @@ class WebChannel(ChatChannel):
                 context["phone_number"] = phone_number
                 context["reply_mode"] = reply_mode
                 context["parent_reply_mode"] = parent_reply_mode
+                context["quote"] = quote
 
                 _log_ctx = {
                     "user_id": user_id,
@@ -791,6 +812,7 @@ class WebChannel(ChatChannel):
                     image_caption=prompt,
                     timezone=timezone,
                     sensor_label=sensor_label,
+                    quote=quote,
                     **_log_ctx,
                 )
 
@@ -816,6 +838,7 @@ class WebChannel(ChatChannel):
                         request_id,
                         image_url_input,
                         weather_text=sensor_label,
+                        quote=quote,
                     )
                     if prompt and prompt.strip():
                         db.append_chat_message(
@@ -827,6 +850,7 @@ class WebChannel(ChatChannel):
                             source,
                             request_id,
                             weather_text=sensor_label,
+                            quote=quote,
                         )
 
                 self._track_proactive_conversation(context)
@@ -872,6 +896,7 @@ class WebChannel(ChatChannel):
                 context["phone_number"] = phone_number
                 context["reply_mode"] = reply_mode
                 context["parent_reply_mode"] = parent_reply_mode
+                context["quote"] = quote
 
                 _log_ctx = {
                     "user_id": user_id,
@@ -889,6 +914,7 @@ class WebChannel(ChatChannel):
                     image_caption=prompt,
                     timezone=timezone,
                     sensor_label=sensor_label,
+                    quote=quote,
                     **_log_ctx,
                 )
 
@@ -914,6 +940,7 @@ class WebChannel(ChatChannel):
                         source,
                         request_id,
                         weather_text=sensor_label,
+                        quote=quote,
                     )
 
                 self._track_proactive_conversation(context)
@@ -956,6 +983,7 @@ class WebChannel(ChatChannel):
             context["phone_number"] = phone_number
             context["reply_mode"] = reply_mode
             context["parent_reply_mode"] = parent_reply_mode
+            context["quote"] = quote
             if change_settings:
                 context["change_settings"] = True
 
@@ -974,6 +1002,7 @@ class WebChannel(ChatChannel):
                 message=prompt,
                 timezone=timezone,
                 sensor_label=sensor_label,
+                quote=quote,
                 **_log_ctx,
             )
 
@@ -993,6 +1022,7 @@ class WebChannel(ChatChannel):
                 message_id = db.append_chat_message(
                     user_id, session_id, "user", prompt, "text", source, request_id,
                     weather_text=sensor_label,
+                    quote=quote,
                 )
 
             self._track_proactive_conversation(context)
